@@ -4,7 +4,8 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { addFavorite, clearFavorites, readFavorites, removeFavorite, type FavoritePlace } from './favorites'
 
 type Category = 'all' | 'food' | 'stay' | 'see'
-type Place = { id: string; name: string; category: Exclude<Category,'all'>; lat: number; lon: number; distance_m: number; source: string; source_url: string; website: string | null }
+type SourceAttribution = { provider_id: string; label: string; text: string; url: string; license: string }
+type Place = { id: string; name: string; category: Exclude<Category,'all'>; lat: number; lon: number; distance_m: number; source: string; source_url: string; attribution: SourceAttribution; website: string | null }
 type ScanResponse = { places: Place[]; scanned_at_unix: number; source: string; cached: boolean }
 const categories: { key: Category; label: string; icon: string }[] = [
   {key:'all',label:'Everything',icon:'✦'}, {key:'food',label:'Food & coffee',icon:'◈'},
@@ -91,9 +92,13 @@ export default function App(){
     try{
       const r=await fetch(`/api/scan?lat=${encodeURIComponent(a)}&lon=${encodeURIComponent(b)}&radius_m=${radius}`,{signal:c.signal})
       const payload=await r.json()
-      if(!r.ok) throw new Error(payload?.error||`Scan failed (${r.status})`)
+      if(!r.ok){
+        const provider=payload?.provider_id?` · ${payload.provider_id}${payload.code?` / ${payload.code}`:''}`:''
+        const retry=payload?.retry_after_seconds?` (retry in ${payload.retry_after_seconds}s)`:''
+        throw new Error(`${payload?.error||`Scan failed (${r.status})`}${provider}${retry}`)
+      }
       setData(payload as ScanResponse)
-    }catch(e){if((e as Error).name!=='AbortError'){setError(`${(e as Error).message}. Check that the Rust API is running.`)}}
+    }catch(e){if((e as Error).name!=='AbortError'){const networkHint=e instanceof TypeError?'. Check that the Rust API is running.':'';setError(`${(e as Error).message}${networkHint}`)}}
     finally{if(controller.current===c)setBusy(false)}
   }
   const locate=()=>{
@@ -138,11 +143,11 @@ export default function App(){
         {!data?<div className="empty"><span>✦</span><strong>Ready when you are</strong><p>Scan a region to populate nearby places with source links.</p></div>:
           places.length===0?<div className="empty"><span>⌁</span><strong>No matching places</strong><p>Try another category, query or radius.</p></div>:
           places.map(p=><article className={`place-card ${p.id===selected?'selected':''}`} key={p.id} onClick={()=>setSelected(p.id)}>
-            <div className={`place-symbol ${p.category}`}>{symbol(p.category)}</div><div className="place-body"><div className="place-type">{categoryLabel(p.category)}</div><h3>{p.name}</h3><p>◎ &nbsp; {prettyDistance(p.distance_m)} away</p><div className="place-links"><a href={p.source_url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>OpenStreetMap ↗</a>{p.website&&<a href={p.website} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Website ↗</a>}<button className="favorite-toggle" aria-pressed={favorites.some(favorite=>favorite.id===p.id)} onClick={e=>{e.stopPropagation();toggleFavorite(p)}}>{favorites.some(favorite=>favorite.id===p.id)?'★ Saved':'☆ Save place'}</button></div></div>
+            <div className={`place-symbol ${p.category}`}>{symbol(p.category)}</div><div className="place-body"><div className="place-type">{categoryLabel(p.category)}</div><h3>{p.name}</h3><p>◎ &nbsp; {prettyDistance(p.distance_m)} away</p><div className="place-links"><a href={p.source_url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Open record ↗</a><a href={p.attribution.url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>{p.attribution.text} ↗</a>{p.website&&<a href={p.website} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Website ↗</a>}<button className="favorite-toggle" aria-pressed={favorites.some(favorite=>favorite.id===p.id)} onClick={e=>{e.stopPropagation();toggleFavorite(p)}}>{favorites.some(favorite=>favorite.id===p.id)?'★ Saved':'☆ Save place'}</button></div></div>
           </article>)}
       </div></section>
       </>}
-      {screen==='saved'&&<section className="results saved-results"><div className="results-header"><div><div className="overline">ON THIS DEVICE ONLY</div><h2>Saved place links</h2><p>Only selected OpenStreetMap IDs and source URLs are stored in this browser. Scans and coordinates are not saved.</p></div>{favorites.length>0&&<button className="ghost clear-favorites" onClick={deleteAllFavorites}>Clear all saved places</button>}</div>{error&&<p role="alert" className="error">⚠ {error}</p>}<div className="places">{favorites.length===0?<div className="empty"><span>☆</span><strong>No saved places</strong><p>Save a place from discovery results to keep its OpenStreetMap link here.</p></div>:favorites.map(favorite=><article className="place-card saved-card" key={favorite.id}><div className="place-symbol">☆</div><div className="place-body"><div className="place-type">OpenStreetMap record</div><h3>{favorite.id}</h3><div className="place-links"><a href={favorite.source_url} target="_blank" rel="noopener noreferrer">OpenStreetMap ↗</a><button className="favorite-toggle" onClick={()=>deleteFavorite(favorite.id)}>Remove</button></div></div></article>)}</div></section>}
+      {screen==='saved'&&<section className="results saved-results"><div className="results-header"><div><div className="overline">ON THIS DEVICE ONLY</div><h2>Saved place links</h2><p>Only selected OpenStreetMap IDs and source URLs are stored in this browser. Scans and coordinates are not saved.</p></div>{favorites.length>0&&<button className="ghost clear-favorites" onClick={deleteAllFavorites}>Clear all saved places</button>}</div>{error&&<p role="alert" className="error">⚠ {error}</p>}<div className="places">{favorites.length===0?<div className="empty"><span>☆</span><strong>No saved places</strong><p>Save a place from discovery results to keep its OpenStreetMap link here.</p></div>:favorites.map(favorite=><article className="place-card saved-card" key={favorite.id}><div className="place-symbol">☆</div><div className="place-body"><div className="place-type">OpenStreetMap record</div><h3>{favorite.id}</h3><div className="place-links"><a href={favorite.source_url} target="_blank" rel="noopener noreferrer">Open record ↗</a><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors ↗</a><button className="favorite-toggle" onClick={()=>deleteFavorite(favorite.id)}>Remove</button></div></div></article>)}</div></section>}
       <footer>NightKnight Explore · Open-source alpha · Places © OpenStreetMap contributors (ODbL) · No reviews or ratings included in this build.</footer>
     </main>
   </div>

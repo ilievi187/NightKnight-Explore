@@ -38,9 +38,11 @@ The public Overpass endpoint is a shared resource: this MVP enforces an 8-second
 
 `GET /api/health` — server status
 
-`GET /api/scan?lat=43.214&lon=27.915&radius_m=2500` — manual POI scan, results with `source: OpenStreetMap`, actual distance and source URL; requests may return 429 on cooldown or 502 if the public data provider is unavailable. No authentication is implemented; **do not bind this prototype to a public network interface**.
+`GET /api/scan?lat=43.214&lon=27.915&radius_m=2500` — manual POI scan, results with canonical record URLs, actual distance, and per-place attribution; provider failures include machine-readable codes and retry hints when known. Requests may return 429 on cooldown or 502 if the public data provider is unavailable. No authentication is implemented; **do not bind this prototype to a public network interface**.
 
 Options: `OVERPASS_ENDPOINT` defaults to `https://overpass.private.coffee/api/interpreter` (replace with trusted service); `BIND_ADDRESS` defaults to `127.0.0.1:8787`.
+
+Provider response metadata, attribution, error states, cache/retention rules, and the disabled-provider review gate are documented in [`docs/provider-integration.md`](docs/provider-integration.md).
 
 ## Project plan
 

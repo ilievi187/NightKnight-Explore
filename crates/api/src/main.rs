@@ -14,6 +14,8 @@ use std::{
 use tokio::sync::Mutex;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
+const OVERPASS_CACHE_TTL: Duration = Duration::from_secs(900);
+
 #[derive(Clone)]
 struct AppState {
     http: reqwest::Client,
@@ -33,6 +35,14 @@ struct ScanQuery {
     radius_m: Option<u32>,
 }
 #[derive(Serialize, Clone)]
+struct SourceAttribution {
+    provider_id: &'static str,
+    label: &'static str,
+    text: &'static str,
+    url: &'static str,
+    license: &'static str,
+}
+#[derive(Serialize, Clone)]
 struct Place {
     id: String,
     name: String,
@@ -42,6 +52,7 @@ struct Place {
     distance_m: u32,
     source: &'static str,
     source_url: String,
+    attribution: SourceAttribution,
     website: Option<String>,
 }
 #[derive(Serialize, Clone)]
@@ -54,6 +65,9 @@ struct ScanResponse {
 #[derive(Serialize)]
 struct ApiError {
     error: String,
+    code: &'static str,
+    provider_id: Option<&'static str>,
+    retry_after_seconds: Option<u64>,
 }
 #[derive(Deserialize)]
 struct OverpassResponse {
@@ -139,20 +153,23 @@ async fn scan(
         ));
     }
     let key = format!("{:.4}:{:.4}:{radius}", q.lat, q.lon);
-    if let Some(hit) = state.cache.lock().await.get(&key) {
-        if hit.created.elapsed() < Duration::from_secs(900) {
-            let mut data = hit.response.clone();
-            data.cached = true;
-            return Ok(Json(data));
-        }
+    let mut cache = state.cache.lock().await;
+    cache.retain(|_, hit| hit.created.elapsed() < OVERPASS_CACHE_TTL);
+    if let Some(hit) = cache.get(&key) {
+        let mut data = hit.response.clone();
+        data.cached = true;
+        return Ok(Json(data));
     }
+    drop(cache);
     // Small shared-service safeguard. The lock is held through request initiation
     // to avoid concurrent requests defeating the cooldown.
     let mut guard = state.last_external_request.lock().await;
     if guard.is_some_and(|last| last.elapsed() < Duration::from_secs(8)) {
-        return Err(error(
+        return Err(provider_error(
             StatusCode::TOO_MANY_REQUESTS,
+            "provider_rate_limited",
             "Scan cooldown: please retry after 8 seconds",
+            Some(8),
         ));
     }
     *guard = Some(Instant::now());
@@ -171,19 +188,28 @@ async fn scan(
         .await
         .map_err(|e| {
             tracing::warn!("Overpass unavailable: {e}");
-            error(StatusCode::BAD_GATEWAY, "Place data provider unavailable")
+            provider_error(
+                StatusCode::BAD_GATEWAY,
+                "provider_unavailable",
+                "Place data provider unavailable",
+                None,
+            )
         })?;
     if !result.status().is_success() {
         tracing::warn!(status=%result.status(), "Overpass returned error");
-        return Err(error(
+        return Err(provider_error(
             StatusCode::BAD_GATEWAY,
+            "provider_unavailable",
             "Place data provider returned an error",
+            None,
         ));
     }
     let payload: OverpassResponse = result.json().await.map_err(|_| {
-        error(
+        provider_error(
             StatusCode::BAD_GATEWAY,
+            "provider_invalid_response",
             "Invalid place data provider response",
+            None,
         )
     })?;
     let mut places: Vec<_> = payload
@@ -210,10 +236,41 @@ async fn scan(
 }
 
 fn error(status: StatusCode, msg: &str) -> (StatusCode, Json<ApiError>) {
+    let code = match status {
+        StatusCode::BAD_REQUEST => "invalid_scan_parameters",
+        StatusCode::TOO_MANY_REQUESTS => "request_rate_limited",
+        _ => "request_failed",
+    };
+    api_error(status, code, msg, None, None)
+}
+fn provider_error(
+    status: StatusCode,
+    code: &'static str,
+    msg: &str,
+    retry_after_seconds: Option<u64>,
+) -> (StatusCode, Json<ApiError>) {
+    api_error(
+        status,
+        code,
+        msg,
+        Some("openstreetmap-overpass"),
+        retry_after_seconds,
+    )
+}
+fn api_error(
+    status: StatusCode,
+    code: &'static str,
+    msg: &str,
+    provider_id: Option<&'static str>,
+    retry_after_seconds: Option<u64>,
+) -> (StatusCode, Json<ApiError>) {
     (
         status,
         Json(ApiError {
             error: msg.to_owned(),
+            code,
+            provider_id,
+            retry_after_seconds,
         }),
     )
 }
@@ -262,6 +319,13 @@ fn to_place(el: OverpassElement, center_lat: f64, center_lon: f64, radius: u32) 
         distance_m: dist,
         source: "OpenStreetMap",
         source_url: format!("https://www.openstreetmap.org/{}/{}", el.kind, el.id),
+        attribution: SourceAttribution {
+            provider_id: "openstreetmap",
+            label: "OpenStreetMap contributors",
+            text: "© OpenStreetMap contributors",
+            url: "https://www.openstreetmap.org/copyright",
+            license: "ODbL-1.0",
+        },
         website,
     })
 }
@@ -325,5 +389,45 @@ mod tests {
             tags: Some(HashMap::new()),
         };
         assert!(to_place(e, 43.0, 27.0, 3000).is_none());
+    }
+
+    #[test]
+    fn place_has_provider_neutral_attribution_and_canonical_record_url() {
+        let mut tags = HashMap::new();
+        tags.insert("name".into(), "Test Cafe".into());
+        tags.insert("amenity".into(), "cafe".into());
+        let element = OverpassElement {
+            kind: "node".into(),
+            id: 42,
+            lat: Some(43.0),
+            lon: Some(27.0),
+            center: None,
+            tags: Some(tags),
+        };
+
+        let place = to_place(element, 43.0, 27.0, 500).unwrap();
+
+        assert_eq!(place.source_url, "https://www.openstreetmap.org/node/42");
+        assert_eq!(place.attribution.provider_id, "openstreetmap");
+        assert_eq!(place.attribution.text, "© OpenStreetMap contributors");
+        assert_eq!(
+            place.attribution.url,
+            "https://www.openstreetmap.org/copyright"
+        );
+        assert_eq!(place.attribution.license, "ODbL-1.0");
+    }
+
+    #[test]
+    fn provider_rate_limit_error_identifies_source_and_retry_window() {
+        let (_, Json(payload)) = provider_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "provider_rate_limited",
+            "Try again shortly",
+            Some(8),
+        );
+
+        assert_eq!(payload.code, "provider_rate_limited");
+        assert_eq!(payload.provider_id, Some("openstreetmap-overpass"));
+        assert_eq!(payload.retry_after_seconds, Some(8));
     }
 }
