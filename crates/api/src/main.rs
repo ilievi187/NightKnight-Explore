@@ -620,7 +620,7 @@ async fn scan(
             "Invalid coordinates or radius (500–10000m)",
         ));
     }
-    let key = scan_cache_key(q.lat, q.lon, radius);
+    let key = scan_cache_key(q.lat, q.lon, radius, offset);
     let mut cache = state.cache.lock().await;
     cache.retain(|_, hit| hit.created.elapsed() < OVERPASS_CACHE_TTL);
     if let Some(hit) = cache.get(&key) {
@@ -664,8 +664,21 @@ async fn scan(
                     },
                     website: lp.website.clone(),
                     gem: {
-                        let tags: HashMap<String, String> =
-                            serde_json::from_str(&lp.tags).unwrap_or_default();
+                        let tags: HashMap<String, String> = {
+                            // Try HashMap format first (new format)
+                            if let Ok(map) =
+                                serde_json::from_str::<HashMap<String, String>>(&lp.tags)
+                            {
+                                map
+                            } else if let Ok(arr) =
+                                serde_json::from_str::<Vec<(String, String)>>(&lp.tags)
+                            {
+                                // Fall back to array format (old format)
+                                arr.into_iter().collect()
+                            } else {
+                                HashMap::new()
+                            }
+                        };
                         assess_gem(&tags)
                     },
                 }
@@ -1131,11 +1144,11 @@ fn retry_hint(failure: OverpassFailure, upstream_hint: Option<u64>) -> Option<u6
     }
 }
 
-fn scan_cache_key(lat: f64, lon: f64, radius_m: u32) -> String {
+fn scan_cache_key(lat: f64, lon: f64, radius_m: u32, offset: usize) -> String {
     let normalized_lat = if lat == 0.0 { 0.0 } else { lat };
     let normalized_lon = if lon == 0.0 { 0.0 } else { lon };
     format!(
-        "{:016x}:{:016x}:{radius_m}",
+        "{:016x}:{:016x}:{radius_m}:{offset}",
         normalized_lat.to_bits(),
         normalized_lon.to_bits()
     )
@@ -1842,20 +1855,20 @@ mod tests {
     #[test]
     fn scan_cache_key_distinguishes_nearby_origins() {
         assert_ne!(
-            scan_cache_key(43.21401, 27.915, 2500),
-            scan_cache_key(43.21402, 27.915, 2500)
+            scan_cache_key(43.21401, 27.915, 2500, 0),
+            scan_cache_key(43.21402, 27.915, 2500, 0)
         );
     }
 
     #[test]
     fn scan_cache_key_reuses_identical_origin_and_radius() {
         assert_eq!(
-            scan_cache_key(43.21401, 27.915, 2500),
-            scan_cache_key(43.21401, 27.915, 2500)
+            scan_cache_key(43.21401, 27.915, 2500, 0),
+            scan_cache_key(43.21401, 27.915, 2500, 0)
         );
         assert_ne!(
-            scan_cache_key(43.21401, 27.915, 2500),
-            scan_cache_key(43.21401, 27.915, 3000)
+            scan_cache_key(43.21401, 27.915, 2500, 0),
+            scan_cache_key(43.21401, 27.915, 3000, 0)
         );
     }
 
