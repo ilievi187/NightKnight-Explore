@@ -346,6 +346,21 @@ async fn google_search(
 
     let lat = req.get("lat").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let lon = req.get("lon").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+    if !lat.is_finite()
+        || !lon.is_finite()
+        || !(-90.0..=90.0).contains(&lat)
+        || !(-180.0..=180.0).contains(&lon)
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_coordinates",
+            "Invalid latitude or longitude",
+            None,
+            None,
+        ));
+    }
+
     let radius = req
         .get("radius_m")
         .and_then(|v| v.as_u64())
@@ -420,11 +435,11 @@ async fn google_details(
     };
 
     let place_id = req.get("place_id").and_then(|v| v.as_str()).unwrap_or("");
-    if place_id.is_empty() {
+    if place_id.is_empty() || place_id.len() > 256 {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "place_id is required",
+            "invalid_place_id",
+            "place_id is required and must be under 256 characters",
             None,
             None,
         ));
@@ -432,7 +447,8 @@ async fn google_details(
 
     let client = state.http.clone();
     let response = client
-        .get(&format!("https://places.googleapis.com/v1/places/{}?key={}", place_id, key))
+        .get(&format!("https://places.googleapis.com/v1/places/{}", place_id))
+        .header("X-Goog-Api-Key", key)
         .header("X-Goog-FieldMask", "id,displayName,rating,userRatingCount,formattedAddress,websiteUri,internationalPhoneNumber,priceLevel,regularOpeningHours,photos,reviews")
         .send()
         .await

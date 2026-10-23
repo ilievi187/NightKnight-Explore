@@ -13,6 +13,8 @@ type Place = { id: string; name: string; category: Exclude<Category,'all'>; lat:
 type ScanResponse = { places: Place[]; scanned_at_unix: number; source: string; cached: boolean }
 type GeocodePlace = { id: string; display_name: string; lat: number; lon: number; source_url: string }
 type GeocodeResponse = { results: GeocodePlace[]; source: string; attribution: SourceAttribution; cached: boolean }
+type GooglePlace = { place_id: string; name: string; types: string[]; rating?: number; user_ratings_total?: number; formatted_address?: string; website?: string; phone_number?: string; price_level?: number; photo_references?: string[] }
+type GooglePlaceDetails = { name: string; rating?: number; user_ratings_total?: number; formatted_address?: string; website?: string; phone_number?: string; price_level?: number; opening_hours?: { open_now?: boolean; periods?: { open: boolean; close: { time: number } }[] }; review?: { author_name: string; rating: number; text: string; relative_time_description: string }[]; photos?: { photo_reference: string; width: number; height: number }[] }
 const categories: { key: Category; label: string; icon: string }[] = [
   {key:'all',label:'Everything',icon:'✦'}, {key:'see',label:'Attractions',icon:'⌁'},
   {key:'history',label:'Historical',icon:'⌂'}, {key:'nature',label:'Nature',icon:'❧'},
@@ -98,6 +100,9 @@ export default function App(){
   const [search,setSearch]=useState('')
   const [sortBy,setSortBy]=useState<'distance'|'gems'>('distance')
   const [data,setData]=useState<ScanResponse|null>(null)
+  const [googlePlaces,setGooglePlaces]=useState<GooglePlace[]>([])
+  const [googleDetails,setGoogleDetails]=useState<GooglePlaceDetails|null>(null)
+  const [googleDetailsLoading,setGoogleDetailsLoading]=useState(false)
   const [error,setError]=useState('')
   const [busy,setBusy]=useState(false)
   const [startedAt,setStartedAt]=useState<number|null>(null)
@@ -107,6 +112,16 @@ export default function App(){
   const [selected,setSelected]=useState<string|null>(null)
   const selectionTrigger=useRef<HTMLElement|null>(null)
   const controller=useRef<AbortController|null>(null)
+  const fetchGoogleDetails=async(placeId:string)=>{
+    setGoogleDetailsLoading(true)
+    try{
+      const r=await fetch('/api/google/details',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({place_id:placeId})})
+      const payload=await readJsonBody(r)
+      if(!r.ok)throw new Error(scanErrorMessage(r,payload))
+      setGoogleDetails(payload as GooglePlaceDetails)
+    }catch(e){setError((e as Error).message)}
+    finally{setGoogleDetailsLoading(false)}
+  }
   const selectPlace=useCallback((id:string,trigger?:HTMLElement)=>{
     if(trigger)selectionTrigger.current=trigger
     setSelected(id)
@@ -139,12 +154,25 @@ export default function App(){
     setBusy(true);setError('');setSelected(null);setScanDuration(null)
     const start=Date.now();setStartedAt(start);setElapsed(0)
     try{
-      const r=await fetch(`/api/scan?lat=${encodeURIComponent(a)}&lon=${encodeURIComponent(b)}&radius_m=${radius}`,{signal:c.signal})
-      const payload=await readJsonBody(r)
-      if(!r.ok)throw new Error(scanErrorMessage(r,payload))
-      if(!payload||typeof payload!=='object'||!Array.isArray((payload as ScanResponse).places)){throw new Error('The API returned an unexpected response shape. Check that the Rust API version matches the web app.')}
-      setData(payload as ScanResponse)
-      setScanDuration(Date.now()-start)
+      if(providerMode==='google'&&googleApiKey){
+        // Google Places search
+        const r=await fetch('/api/google/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lat:a,lon:b,radius_m:radius,max_results:20}),signal:c.signal})
+        const payload=await readJsonBody(r)
+        if(!r.ok)throw new Error(scanErrorMessage(r,payload))
+        if(!Array.isArray(payload)){throw new Error('Google Places returned an unexpected response. Check that the API version matches the web app.')}
+        setGooglePlaces(payload as GooglePlace[])
+        setData(null) // Clear OSM data
+        setScanDuration(Date.now()-start)
+      } else {
+        // OSM Overpass scan
+        const r=await fetch(`/api/scan?lat=${encodeURIComponent(a)}&lon=${encodeURIComponent(b)}&radius_m=${radius}`,{signal:c.signal})
+        const payload=await readJsonBody(r)
+        if(!r.ok)throw new Error(scanErrorMessage(r,payload))
+        if(!payload||typeof payload!=='object'||!Array.isArray((payload as ScanResponse).places)){throw new Error('The API returned an unexpected response shape. Check that the Rust API version matches the web app.')}
+        setData(payload as ScanResponse)
+        setGooglePlaces([]) // Clear Google data
+        setScanDuration(Date.now()-start)
+      }
     }catch(e){if((e as Error).name!=='AbortError'){const networkHint=e instanceof TypeError?'. Check that the Rust API is running.':'';setError(`${(e as Error).message}${networkHint}`)}}
     finally{if(controller.current===c){setBusy(false);setStartedAt(null)}}
   }
@@ -180,7 +208,7 @@ export default function App(){
     },err=>{setError(`Location not available: ${err.message}`);setLocating(false)},
     {enableHighAccuracy:false,timeout:10000,maximumAge:120000})
   }
-  useEffect(()=>()=>{controller.current?.abort()},[])
+  useEffect(()=>{setData(null);setGooglePlaces([]);setSelected(null);setError('')},[providerMode])
   useEffect(()=>{
     // Check provider configuration from backend
     fetch('/api/provider').then(r=>r.json()).then(data=>{
@@ -228,6 +256,19 @@ export default function App(){
       <section className="results" aria-labelledby="discovery-results-title"><div className="results-header"><div><div className="overline">DISCOVERY RESULTS</div><h2 id="discovery-results-title">{data?`${places.length} places found`:'Your next discovery starts here'}</h2><p>{data?`Source: ${data.source} • ${data.cached?'cached scan':'fresh scan'}${scanDuration!==null&&!data.cached?` • completed in ${prettyElapsed(scanDuration)}`:''} • ${sortBy==='gems'?'gem signals first':'distance-sorted'} results`:'Choose a location and start a scan to find real nearby places.'}</p></div><div className="results-tools"><button className="ghost sort-toggle" aria-pressed={sortBy==='gems'} onClick={()=>setSortBy(sortBy==='gems'?'distance':'gems')} disabled={!data||data.places.every(p=>!p.gem)}>{sortBy==='gems'?'Ⓓ Distance first':'✦ Hidden gems first'}</button><input className="search" aria-label="Search scanned places" placeholder="⌕ Search results" value={search} onChange={e=>setSearch(e.target.value)}/></div></div>
       <div className="tabs" role="group" aria-label="Filter results by category">{categories.map(c=><button key={c.key} type="button" aria-pressed={c.key===category} className={c.key===category?'active':''} onClick={()=>{setCategory(c.key);setSelected(null)}}>{c.icon} &nbsp; {c.label}</button>)}</div>
       <p className="sr-only" role="status" aria-live="polite">{selectedPlace?`Selected ${selectedPlace.name}, ${prettyDistance(selectedPlace.distance_m)} away. Place details are shown above the results.`:''}</p>
+      {googleDetails&&<section className="selected-detail" aria-labelledby="google-place-title">
+        <div className="selected-detail-body">
+          <div className="selected-detail-top"><div><div className="place-type">Google Place</div><h3 id="google-place-title">{googleDetails.name}</h3></div><button className="detail-close" aria-label="Close place details" onClick={()=>setGoogleDetails(null)}>×</button></div>
+          {googleDetails.rating&&<p>★ {googleDetails.rating} ({googleDetails.user_ratings_total||0} reviews)</p>}
+          {googleDetails.formatted_address&&<p>{googleDetails.formatted_address}</p>}
+          {googleDetails.opening_hours?.open_now!==undefined&&<p>{googleDetails.opening_hours.open_now?'Open now':'Closed'}</p>}
+          {googleDetails.website&&<a href={googleDetails.website} target="_blank" rel="noopener noreferrer">Website ↗</a>}
+          {googleDetails.phone_number&&<p>{googleDetails.phone_number}</p>}
+          {googleDetails.review&&googleDetails.review.length>0&&<div className="google-reviews"><h4>Reviews (up to 5 from Google)</h4>{googleDetails.review.map((r,i)=><div key={i} className="review"><strong>{r.author_name}</strong> ★{r.rating}<p>{r.text}</p><small>{r.relative_time_description}</small></div>)}</div>}
+          {googleDetails.photos&&googleDetails.photos.length>0&&<div className="google-photos"><h4>Photos</h4>{googleDetails.photos.map((p,i)=><img key={i} src={`https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photoreference=${p.photo_reference}&key=${googleApiKey}`} alt={`Photo ${i+1}`} loading="lazy"/>)}</div>}
+          <div className="place-links detail-links"><a href={`https://www.google.com/maps/place/?q=place_id:${googlePlaces.find(gp=>gp.name===googleDetails.name)?.place_id}`} target="_blank" rel="noopener noreferrer">Open in Google Maps ↗</a><a href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(googleDetails.formatted_address||googleDetails.name)}`} target="_blank" rel="noopener noreferrer">Directions ↗</a></div>
+        </div>
+      </section>}
       {selectedPlace&&<section className="selected-detail" aria-labelledby="selected-place-title">
         <div className={`place-symbol ${selectedPlace.category}`}>{symbol(selectedPlace.category)}</div>
         <div className="selected-detail-body">
@@ -237,9 +278,22 @@ export default function App(){
         </div>
       </section>}
       <div className="places">
-        {!data?<div className="empty"><span>✦</span><strong>Ready when you are</strong><p>Scan a region to populate nearby places with source links.</p></div>:
-          places.length===0?<div className="empty"><span>⌁</span><strong>No matching places</strong><p>Try another category, query or radius.</p></div>:
-          places.map(p=><article className={`place-card ${p.id===selected?'selected':''}`} key={p.id}>
+        {providerMode==='google'&&googlePlaces.length>0?googlePlaces.map(gp=><article className="place-card" key={gp.place_id}>
+          <div className="place-symbol see">📍</div><div className="place-body">
+          <div className="place-type">{gp.types?.[0]||'Place'}{gp.rating?` · ★ ${gp.rating} (${gp.user_ratings_total||0})`:''}</div>
+          <h3><button type="button" className="place-select" onClick={()=>{fetchGoogleDetails(gp.place_id);setSelected(gp.place_id)}}>{gp.name}</button></h3>
+          {gp.formatted_address&&<p>◎ &nbsp; {gp.formatted_address}</p>}
+          {gp.price_level!==undefined&&<p>Price level: {gp.price_level}</p>}
+          <div className="place-links">
+            <a href={`https://www.google.com/maps/place/?q=place_id:${gp.place_id}`} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Open in Google Maps ↗</a>
+            {gp.website&&<a href={gp.website} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Website ↗</a>}
+            <button className="favorite-toggle" onClick={e=>{e.stopPropagation()}}>☆ Save place</button>
+          </div>
+          </div>
+        </article>):
+        !data?<div className="empty"><span>✦</span><strong>Ready when you are</strong><p>Scan a region to populate nearby places with source links.</p></div>:
+        places.length===0?<div className="empty"><span>⌁</span><strong>No matching places</strong><p>Try another category, query or radius.</p></div>:
+        places.map(p=><article className={`place-card ${p.id===selected?'selected':''}`} key={p.id}>
             <div className={`place-symbol ${p.category}`}>{symbol(p.category)}</div><div className="place-body">
             <div className="place-type">{categoryLabel(p.category)}</div><h3><button type="button" className="place-select" aria-label={`Show ${p.name} on map`} aria-pressed={p.id===selected} onClick={event=>selectPlace(p.id,event.currentTarget)}>{p.name}</button></h3><p>◎ &nbsp; {prettyDistance(p.distance_m)} away</p>
             {p.gem&&(()=>{const tier=gemTier(p.gem!.score);return <>
@@ -251,7 +305,7 @@ export default function App(){
       </div></section>
       </>}
       {screen==='saved'&&<section className="results saved-results"><div className="results-header"><div><div className="overline">ON THIS DEVICE ONLY</div><h2>Saved place links</h2><p>Only selected OpenStreetMap IDs and source URLs are stored in this browser. Scans and coordinates are not saved.</p></div>{favorites.length>0&&<button className="ghost clear-favorites" onClick={deleteAllFavorites}>Clear all saved places</button>}</div>{error&&<p role="alert" className="error">⚠ {error}</p>}<div className="places">{favorites.length===0?<div className="empty"><span>☆</span><strong>No saved places</strong><p>Save a place from discovery results to keep its OpenStreetMap link here.</p></div>:favorites.map(favorite=><article className="place-card saved-card" key={favorite.id}><div className={`place-symbol ${favorite.category||''}`}>{favorite.category?symbol(favorite.category):'☆'}</div><div className="place-body"><div className="place-type">{favorite.category?categoryLabel(favorite.category):'OpenStreetMap record'}</div><h3 title={favorite.id}>{favorite.name||favorite.id}</h3><div className="place-links"><a href={favorite.source_url} target="_blank" rel="noopener noreferrer">Open record ↗</a><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors ↗</a><button className="favorite-toggle" onClick={()=>deleteFavorite(favorite.id)}>Remove</button></div></div></article>)}</div></section>}
-      <footer>NightKnight Explore · Open-source alpha · {providerMode==='google'?'Google Maps Platform (separately licensed) · ':'Places © OpenStreetMap contributors (ODbL) · '}No reviews or ratings included in this build unless Google provider is configured.</footer>
+      <footer>NightKnight Explore · Open-source alpha · {providerMode==='google'?'Google Maps Platform (separately licensed) · ':'Places © OpenStreetMap contributors (ODbL) · '}Discover real places with transparent sources.</footer>
     </main>
   </div>
 }
