@@ -60,7 +60,7 @@ The summary-level status may be `conflicting` or `stale` even when some individu
 
 ## Privacy, retention, and removal
 
-- Keep scan inputs and any summary state in memory only; the existing OSM result cache may retain provider responses in memory for at most 15 minutes as documented in the [provider contract](provider-integration.md). Do not persist scan history or summaries by default. Local favorites store only selected OSM record IDs and source URLs.
+- Keep scan inputs and any summary state in memory only; the existing OSM result cache may retain provider responses in memory for at most 15 minutes as documented in the [provider contract](provider-integration.md). Do not persist scan history or summaries by default. Local favorites store only selected OSM record IDs, canonical source URLs and the records' public name/category labels (see README); no coordinates, search terms or derived scores are stored.
 - Do not send precise coordinates, search history, user identifiers, or unrelated source records to an external model. If model processing is later approved, disclose the recipient, fields sent, purpose, retention, and training policy before enabling it; obtain any required consent and keep the feature off by default.
 - Do not train or fine-tune on source content without explicit authorization covering that use.
 - If a provider removes a record or withdraws access, stop showing affected claims, remove derived content as required, and preserve only the minimum provenance needed for an auditable deletion record. Provider-specific obligations override generic application defaults.
