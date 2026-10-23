@@ -32,7 +32,7 @@ Set coordinates manually (Sofia is only a sample starting point) or explicitly a
 
 Use **Save place** on a result to keep its OpenStreetMap record ID and canonical source URL in this browser's local storage. Saved links remain on this device and can be removed individually or cleared together. NightKnight Explore does not store scan history, names, coordinates, or search terms in favorites; clearing browser site data also removes saved links.
 
-The public Overpass endpoint is a shared resource: this MVP enforces an 8-second cooldown, 15-minute in-memory cache and a limit of 10 km per query; it is **not** appropriate for high-volume production traffic. For public deployment provide your own properly provisioned Overpass instance or another licensed POI data provider. Tile loading must likewise follow the [OSM Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/).
+The public Overpass endpoints are shared resources: this MVP enforces an 8-second cooldown, 15-minute in-memory cache, bounded failover with per-endpoint retry limits, and a hard radius cap of 10 km per query; it is **not** appropriate for high-volume production traffic. For public deployment provide your own properly provisioned Overpass instance or another licensed POI data provider. Tile loading must likewise follow the [OSM Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/).
 
 ## API
 
@@ -40,7 +40,7 @@ The public Overpass endpoint is a shared resource: this MVP enforces an 8-second
 
 `GET /api/scan?lat=43.214&lon=27.915&radius_m=2500` — manual POI scan, results with canonical record URLs, actual distance, and per-place attribution; provider failures include machine-readable codes and retry hints when known. Requests may return 429 on cooldown or 502 if the public data provider is unavailable. No authentication is implemented; **do not bind this prototype to a public network interface**.
 
-Options: `OVERPASS_ENDPOINT` defaults to `https://overpass.private.coffee/api/interpreter` (replace with trusted service); `BIND_ADDRESS` defaults to `127.0.0.1:8787`.
+Options: `OVERPASS_ENDPOINT` (optional) pins a single trusted Overpass service; by default the API fails over across a small list of public Overpass instances and marks unhealthy ones offline for 30 seconds (see [`docs/provider-integration.md`](docs/provider-integration.md)). Real upstream queries take 5–40 seconds under load; the API reports honest `provider_timeout`/`provider_unavailable` errors rather than stalling forever. `BIND_ADDRESS` defaults to `127.0.0.1:8787`.
 
 Provider response metadata, attribution, error states, cache/retention rules, and the disabled-provider review gate are documented in [`docs/provider-integration.md`](docs/provider-integration.md).
 
