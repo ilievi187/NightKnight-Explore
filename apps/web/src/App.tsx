@@ -61,11 +61,49 @@ function ExploreMap({places, lat, lon, selected, onSelect}:{places: Place[],lat:
     markers.current.forEach(m=>m.remove());markers.current=[]
     const origin=document.createElement('div');origin.className='map-origin';origin.title='Scan origin'
     markers.current.push(new maplibre.Marker({element:origin}).setLngLat([lon,lat]).addTo(map))
-    for(const place of places){
-      const marker=document.createElement('button');marker.type='button';marker.className='place-marker';marker.dataset.placeId=place.id;marker.setAttribute('aria-pressed','false')
-      marker.textContent=symbol(place.category);marker.title=place.name;marker.setAttribute('aria-label',`Show ${place.name}`)
-      marker.addEventListener('click',()=>onSelect(place.id,marker))
-      markers.current.push(new maplibre.Marker({element:marker,anchor:'bottom'}).setLngLat([place.lon,place.lat]).addTo(map))
+    // Simple clustering: group places within ~50px at current zoom
+    const zoom=map.getZoom()
+    const clusterThreshold=zoom<11?80:zoom<13?40:0
+    if(clusterThreshold>0&&places.length>5){
+      // Group into clusters
+      const clusters: {center:[number,number],places:Place[]}[]=[]
+      const used=new Set<number>()
+      for(let i=0;i<places.length;i++){
+        if(used.has(i))continue
+        const cluster={center:[places[i].lon,places[i].lat] as [number,number],places:[places[i]]}
+        used.add(i)
+        for(let j=i+1;j<places.length;j++){
+          if(used.has(j))continue
+          const dx=(places[j].lon-places[i].lon)*111000*Math.cos(lat*Math.PI/180)
+          const dy=(places[j].lat-places[i].lat)*111000
+          if(Math.sqrt(dx*dx+dy*dy)<clusterThreshold*1000/zoom){
+            cluster.places.push(places[j]);used.add(j)
+            cluster.center[0]=(cluster.center[0]+places[j].lon)/2
+            cluster.center[1]=(cluster.center[1]+places[j].lat)/2
+          }
+        }
+        clusters.push(cluster)
+      }
+      for(const cluster of clusters){
+        if(cluster.places.length===1){
+          const place=cluster.places[0]
+          const marker=document.createElement('button');marker.type='button';marker.className='place-marker';marker.dataset.placeId=place.id;marker.setAttribute('aria-pressed','false')
+          marker.textContent=symbol(place.category);marker.title=place.name;marker.setAttribute('aria-label',`Show ${place.name}`)
+          marker.addEventListener('click',()=>onSelect(place.id,marker))
+          markers.current.push(new maplibre.Marker({element:marker,anchor:'bottom'}).setLngLat([place.lon,place.lat]).addTo(map))
+        } else {
+          const marker=document.createElement('button');marker.type='button';marker.className='place-cluster';marker.textContent=String(cluster.places.length);marker.title=`${cluster.places.length} places`
+          marker.addEventListener('click',()=>{map.easeTo({center:cluster.center,zoom:zoom+2,duration:300})})
+          markers.current.push(new maplibre.Marker({element:marker}).setLngLat(cluster.center).addTo(map))
+        }
+      }
+    } else {
+      for(const place of places){
+        const marker=document.createElement('button');marker.type='button';marker.className='place-marker';marker.dataset.placeId=place.id;marker.setAttribute('aria-pressed','false')
+        marker.textContent=symbol(place.category);marker.title=place.name;marker.setAttribute('aria-label',`Show ${place.name}`)
+        marker.addEventListener('click',()=>onSelect(place.id,marker))
+        markers.current.push(new maplibre.Marker({element:marker,anchor:'bottom'}).setLngLat([place.lon,place.lat]).addTo(map))
+      }
     }
     if(places.length){
       const bounds=new maplibre.LngLatBounds([lon,lat],[lon,lat]);places.forEach(p=>bounds.extend([p.lon,p.lat]));
@@ -152,7 +190,7 @@ export default function App(){
   const places=useMemo(()=>(data?.places||[]).filter(p=>(category==='all'||p.category===category)&&p.name.toLocaleLowerCase().includes(search.toLocaleLowerCase()))
     .sort((a,b)=>sortBy==='gems'
       ?(b.gem?.score??0)-(a.gem?.score??0)||a.distance_m-b.distance_m
-      :a.distance_m-b.distance_m),[data,category,search,sortBy])
+      :a.distance_m-b.distance_m||(b.gem?.score??0)-(a.gem?.score??0)),[data,category,search,sortBy])
   const selectedPlace=places.find(p=>p.id===selected)
   const toggleFavorite=(place:Place)=>{
     try{
@@ -277,7 +315,7 @@ export default function App(){
         <div className="panel map-panel"><div className="map-heading"><div><span className="overline">GEOSPATIAL VIEW</span><h2>Area overview</h2></div><span className="map-chip">◉ LIVE MAP</span></div>{providerMode==='google'&&googleApiKey?<GoogleMap lat={Number(lat)} lon={Number(lon)} apiKey={googleApiKey} places={googlePlaces} selectedId={selected} onSelect={(id)=>{fetchGoogleDetails(id);setSelected(id)}}/>:<ExploreMap places={places} lat={Number(lat)} lon={Number(lon)} selected={selected} onSelect={selectPlace}/>}
         </div>
       </section>
-      <section className="results" aria-labelledby="discovery-results-title"><div className="results-header"><div><div className="overline">DISCOVERY RESULTS</div><h2 id="discovery-results-title">{data?`${places.length} places found`:'Your next discovery starts here'}</h2><p>{data?`Source: ${data.source} • ${data.cached?'cached scan':'fresh scan'}${scanDuration!==null&&!data.cached?` • completed in ${prettyElapsed(scanDuration)}`:''} • ${sortBy==='gems'?'gem signals first':'distance-sorted'} results`:'Choose a location and start a scan to find real nearby places.'}</p></div><div className="results-tools"><button className="ghost sort-toggle" aria-pressed={sortBy==='gems'} onClick={()=>setSortBy(sortBy==='gems'?'distance':'gems')} disabled={!data||data.places.every(p=>!p.gem)}>{sortBy==='gems'?'Ⓓ Distance first':'✦ Hidden gems first'}</button><input className="search" aria-label="Search scanned places" placeholder="⌕ Search results" value={search} onChange={e=>setSearch(e.target.value)}/></div></div>
+      <section className="results" aria-labelledby="discovery-results-title"><div className="results-header"><div><div className="overline">DISCOVERY RESULTS</div><h2 id="discovery-results-title">{data?`${places.length} of ${data.total_matches} places found`:'Your next discovery starts here'}</h2><p>{data?`Source: ${data.source} • ${data.cached?'cached scan':'fresh scan'}${scanDuration!==null&&!data.cached?` • completed in ${prettyElapsed(scanDuration)}`:''} • ${sortBy==='gems'?'gem signals first':'distance-sorted'} results`:'Choose a location and start a scan to find real nearby places.'}</p></div><div className="results-tools"><button className="ghost sort-toggle" aria-pressed={sortBy==='gems'} onClick={()=>setSortBy(sortBy==='gems'?'distance':'gems')} disabled={!data||data.places.every(p=>!p.gem)}>{sortBy==='gems'?'Ⓓ Distance first':'✦ Hidden gems first'}</button><input className="search" aria-label="Search scanned places" placeholder="⌕ Search results" value={search} onChange={e=>setSearch(e.target.value)}/></div></div>
       <div className="tabs" role="group" aria-label="Filter results by category">{categories.map(c=><button key={c.key} type="button" aria-pressed={c.key===category} className={c.key===category?'active':''} onClick={()=>{setCategory(c.key);setSelected(null)}}>{c.icon} &nbsp; {c.label}</button>)}</div>
       <p className="sr-only" role="status" aria-live="polite">{selectedPlace?`Selected ${selectedPlace.name}, ${prettyDistance(selectedPlace.distance_m)} away. Place details are shown above the results.`:''}</p>
       {googleDetails&&<section className="selected-detail" aria-labelledby="google-place-title">

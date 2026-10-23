@@ -65,6 +65,36 @@ fn process_element(
             .iter()
             .find(|(k, _)| k == "name")
             .map(|(_, v)| v.as_str());
+        // Generate meaningful label for unnamed places
+        let display_name = name.map(|n| n.to_string()).unwrap_or_else(|| {
+            if let Some(amenity) = tags
+                .iter()
+                .find(|(k, _)| k == "amenity")
+                .map(|(_, v)| v.as_str())
+            {
+                format!("{} (unnamed)", amenity.replace('_', " "))
+            } else if let Some(tourism) = tags
+                .iter()
+                .find(|(k, _)| k == "tourism")
+                .map(|(_, v)| v.as_str())
+            {
+                format!("{} (unnamed)", tourism.replace('_', " "))
+            } else if let Some(historic) = tags
+                .iter()
+                .find(|(k, _)| k == "historic")
+                .map(|(_, v)| v.as_str())
+            {
+                format!("{} (unnamed)", historic.replace('_', " "))
+            } else if let Some(natural) = tags
+                .iter()
+                .find(|(k, _)| k == "natural")
+                .map(|(_, v)| v.as_str())
+            {
+                format!("{} (unnamed)", natural.replace('_', " "))
+            } else {
+                format!("OSM {}", id)
+            }
+        });
         if name.is_none() && !has_interesting_tags(tags) {
             return;
         }
@@ -99,7 +129,7 @@ fn process_element(
             id,
             lat,
             lon,
-            name,
+            Some(display_name.as_str()),
             &cat,
             &tags_json,
             wikidata,
