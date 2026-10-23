@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use nightknight_explore_api::osm_db::OsmDatabase;
-use serde_json;
 
 fn category_from_tags(tags: &[(String, String)]) -> Option<String> {
     let tag_map: std::collections::HashMap<&str, &str> =
@@ -208,7 +207,6 @@ fn main() {
                     let _ = rel;
                     let _ = tags;
                 }
-                _ => {}
             }
         })
         .expect("Failed to read PBF pass 2");
