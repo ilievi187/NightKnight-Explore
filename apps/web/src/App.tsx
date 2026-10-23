@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import maplibregl, { type Map } from 'maplibre-gl'
+import { LngLatBounds, Map as MapLibreMap, Marker, NavigationControl } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 
 type Category = 'all' | 'food' | 'stay' | 'see'
@@ -17,16 +17,16 @@ const symbol = (c: Place['category']) => ({food:'◈',stay:'▣',see:'⌁'})[c]
 
 function ExploreMap({places, lat, lon, selected, onSelect}:{places: Place[],lat:number,lon:number,selected:string|null,onSelect:(id:string)=>void}) {
   const container=useRef<HTMLDivElement>(null)
-  const mapRef=useRef<Map|null>(null)
-  const markers=useRef<maplibregl.Marker[]>([])
+  const mapRef=useRef<MapLibreMap|null>(null)
+  const markers=useRef<Marker[]>([])
   useEffect(()=>{
     if(!container.current) return
-    const map=new maplibregl.Map({
+    const map=new MapLibreMap({
       container:container.current,
       style:{version:8,sources:{osm:{type:'raster',tiles:['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],tileSize:256,attribution:'© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a>'}},layers:[{id:'osm',type:'raster',source:'osm'}]},
-      center:[lon,lat],zoom:12,attributionControl:true
+      center:[lon,lat],zoom:12
     })
-    map.addControl(new maplibregl.NavigationControl({showCompass:false}),'top-right')
+    map.addControl(new NavigationControl({showCompass:false}),'top-right')
     mapRef.current=map
     return ()=>{markers.current.forEach(m=>m.remove());markers.current=[];map.remove();mapRef.current=null}
   },[])
@@ -35,15 +35,15 @@ function ExploreMap({places, lat, lon, selected, onSelect}:{places: Place[],lat:
     if(!map || !validLat(lat) || !validLon(lon)) return
     markers.current.forEach(m=>m.remove());markers.current=[]
     const origin=document.createElement('div');origin.className='map-origin';origin.title='Scan origin'
-    markers.current.push(new maplibregl.Marker({element:origin}).setLngLat([lon,lat]).addTo(map))
+    markers.current.push(new Marker({element:origin}).setLngLat([lon,lat]).addTo(map))
     for(const place of places){
       const marker=document.createElement('button');marker.type='button';marker.className=`place-marker ${selected===place.id?'selected':''}`
       marker.textContent=symbol(place.category);marker.title=place.name;marker.setAttribute('aria-label',`Show ${place.name}`)
       marker.addEventListener('click',()=>onSelect(place.id))
-      markers.current.push(new maplibregl.Marker({element:marker,anchor:'bottom'}).setLngLat([place.lon,place.lat]).addTo(map))
+      markers.current.push(new Marker({element:marker,anchor:'bottom'}).setLngLat([place.lon,place.lat]).addTo(map))
     }
     if(places.length){
-      const bounds=new maplibregl.LngLatBounds([lon,lat],[lon,lat]);places.forEach(p=>bounds.extend([p.lon,p.lat]));
+      const bounds=new LngLatBounds([lon,lat],[lon,lat]);places.forEach(p=>bounds.extend([p.lon,p.lat]));
       map.fitBounds(bounds,{padding:60,maxZoom:14,duration:500})
     }else {map.easeTo({center:[lon,lat],zoom:12,duration:300})}
   },[places,lat,lon,selected,onSelect])
