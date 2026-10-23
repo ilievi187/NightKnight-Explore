@@ -26,7 +26,7 @@ Each result can carry a transparent **Hidden Gems signal**: a deterministic scor
 
 If PowerShell blocks downloaded scripts, inspect the script and use `Unblock-File` on the specific files, or `Set-ExecutionPolicy -Scope Process RemoteSigned` in the current session if needed. No permanent policy change is required.
 
-On Linux/macOS: `cd crates/api && cargo run` and, separately, `cd apps/web && npm install && npm run dev`.
+On Linux/macOS: run `./scripts/start-api.sh` (Rust API at `127.0.0.1:8792`, using `data/osm-bulgaria.db` when available) and then `./scripts/start-web.sh` (web app at `127.0.0.1:5199`). Port `8787` is reserved for the separate OmO Board service on NightKnightPC. The Vite proxy points to port `8792` by default; if you override the backend `BIND_ADDRESS`, set the matching `EXPLORE_API_TARGET` for Vite as well. For example: `BIND_ADDRESS=127.0.0.1:8800 ./scripts/start-api.sh` and `EXPLORE_API_TARGET=http://127.0.0.1:8800 ./scripts/start-web.sh`. After updating the repository, verify `http://127.0.0.1:5199/api/health` and run a small `/api/scan` request to catch proxy mismatches.
 
 ## How to scan
 
@@ -46,7 +46,7 @@ Explicit place searches use the public Nominatim service by default, with a one-
 
 `POST /api/geocode` (form field `q`) — explicit user-submitted place search; returns up to five results and OSM attribution. Search terms are not placed in the local API URL/log span. No autocomplete or automatic retry. Searches are cached in process memory for 24 hours; see [`docs/nominatim-geocoder-decision.md`](docs/nominatim-geocoder-decision.md).
 
-Options: `OVERPASS_ENDPOINT` (optional) pins a single trusted Overpass service; by default the API fails over across a small list of public Overpass instances and marks unhealthy ones offline for 30 seconds. `GEOCODER_ENDPOINT` switches Nominatim to a reviewed alternative without a software update (API restart required). See [`docs/provider-integration.md`](docs/provider-integration.md). Real upstream queries take 5–40 seconds under load; the API reports honest `provider_timeout`/`provider_unavailable` errors rather than stalling forever. `BIND_ADDRESS` defaults to `127.0.0.1:8787`.
+Options: `OVERPASS_ENDPOINT` (optional) pins a single trusted Overpass service; by default the API fails over across a small list of public Overpass instances and marks unhealthy ones offline for 30 seconds. `GEOCODER_ENDPOINT` switches Nominatim to a reviewed alternative without a software update (API restart required). See [`docs/provider-integration.md`](docs/provider-integration.md). Real upstream queries take 5–40 seconds under load; the API reports honest `provider_timeout`/`provider_unavailable` errors rather than stalling forever. `BIND_ADDRESS` defaults to `127.0.0.1:8792` on the Rust API; Vite defaults to proxying `/api` to this address.
 
 Provider response metadata, attribution, error states, cache/retention rules, and the disabled-provider review gate are documented in [`docs/provider-integration.md`](docs/provider-integration.md).
 
