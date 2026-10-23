@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import type { Map as MapLibreMap, Marker } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { addFavorite, clearFavorites, readFavorites, removeFavorite, type FavoritePlace } from './favorites'
@@ -23,7 +23,7 @@ const categoryLabel = (c: Place['category']) => ({food:'Food & coffee',stay:'Pla
 const symbol = (c: Place['category']) => ({food:'◈',stay:'▣',see:'⌁',history:'⌂',nature:'❧'})[c]
 const gemClass = (tier: string) => tier === 'rare' ? 'gem-high' : tier === 'strong' ? 'gem-mid' : 'gem-low'
 
-function ExploreMap({places, lat, lon, selected, onSelect}:{places: Place[],lat:number,lon:number,selected:string|null,onSelect:(id:string)=>void}) {
+function ExploreMap({places, lat, lon, selected, onSelect}:{places: Place[],lat:number,lon:number,selected:string|null,onSelect:(id:string,trigger?:HTMLElement)=>void}) {
   const container=useRef<HTMLDivElement>(null)
   const mapRef=useRef<MapLibreMap|null>(null)
   const maplibreRef=useRef<typeof import('maplibre-gl')|null>(null)
@@ -59,16 +59,25 @@ function ExploreMap({places, lat, lon, selected, onSelect}:{places: Place[],lat:
     const origin=document.createElement('div');origin.className='map-origin';origin.title='Scan origin'
     markers.current.push(new maplibre.Marker({element:origin}).setLngLat([lon,lat]).addTo(map))
     for(const place of places){
-      const marker=document.createElement('button');marker.type='button';marker.className=`place-marker ${selected===place.id?'selected':''}`
+      const marker=document.createElement('button');marker.type='button';marker.className='place-marker';marker.dataset.placeId=place.id;marker.setAttribute('aria-pressed','false')
       marker.textContent=symbol(place.category);marker.title=place.name;marker.setAttribute('aria-label',`Show ${place.name}`)
-      marker.addEventListener('click',()=>onSelect(place.id))
+      marker.addEventListener('click',()=>onSelect(place.id,marker))
       markers.current.push(new maplibre.Marker({element:marker,anchor:'bottom'}).setLngLat([place.lon,place.lat]).addTo(map))
     }
     if(places.length){
       const bounds=new maplibre.LngLatBounds([lon,lat],[lon,lat]);places.forEach(p=>bounds.extend([p.lon,p.lat]));
       map.fitBounds(bounds,{padding:60,maxZoom:14,duration:500})
     }else {map.easeTo({center:[lon,lat],zoom:12,duration:300})}
-  },[places,lat,lon,selected,onSelect,mapReady])
+  },[places,lat,lon,onSelect,mapReady])
+  useEffect(()=>{
+    markers.current.forEach(marker=>{
+      const element=marker.getElement()
+      if(!element.classList.contains('place-marker'))return
+      const isSelected=element.dataset.placeId===selected
+      element.classList.toggle('selected',isSelected)
+      element.setAttribute('aria-pressed',String(isSelected))
+    })
+  },[selected,places,mapReady])
   return <div className="map" ref={container} aria-label="Interactive map of scanned places">{!mapReady&&<div className="map-loading" role={mapError?'alert':'status'}>{mapError?'Map unavailable — reload to try again':'◌ Loading map engine…'}</div>}</div>
 }
 
@@ -93,7 +102,12 @@ export default function App(){
   const [scanDuration,setScanDuration]=useState<number|null>(null)
   const [locating,setLocating]=useState(false)
   const [selected,setSelected]=useState<string|null>(null)
+  const selectionTrigger=useRef<HTMLElement|null>(null)
   const controller=useRef<AbortController|null>(null)
+  const selectPlace=useCallback((id:string,trigger?:HTMLElement)=>{
+    if(trigger)selectionTrigger.current=trigger
+    setSelected(id)
+  },[])
   const places=useMemo(()=>(data?.places||[]).filter(p=>(category==='all'||p.category===category)&&p.name.toLocaleLowerCase().includes(search.toLocaleLowerCase()))
     .sort((a,b)=>sortBy==='gems'
       ?(b.gem?.score??0)-(a.gem?.score??0)||a.distance_m-b.distance_m
@@ -195,15 +209,16 @@ export default function App(){
           {busy&&<p role="status" className="scan-progress" aria-live="polite">⌛ {scanProgressNote(elapsed,isCached)} ({prettyElapsed(elapsed)})</p>}
           {error&&<p role="alert" className="error">⚠ {error}</p>}
         </div>
-        <div className="panel map-panel"><div className="map-heading"><div><span className="overline">GEOSPATIAL VIEW</span><h2>Area overview</h2></div><span className="map-chip">◉ LIVE MAP</span></div><ExploreMap places={places} lat={Number(lat)} lon={Number(lon)} selected={selected} onSelect={setSelected}/>
+        <div className="panel map-panel"><div className="map-heading"><div><span className="overline">GEOSPATIAL VIEW</span><h2>Area overview</h2></div><span className="map-chip">◉ LIVE MAP</span></div><ExploreMap places={places} lat={Number(lat)} lon={Number(lon)} selected={selected} onSelect={selectPlace}/>
         </div>
       </section>
-      <section className="results"><div className="results-header"><div><div className="overline">DISCOVERY RESULTS</div><h2>{data?`${places.length} places found`:'Your next discovery starts here'}</h2><p>{data?`Source: ${data.source} • ${data.cached?'cached scan':'fresh scan'}${scanDuration!==null&&!data.cached?` • completed in ${prettyElapsed(scanDuration)}`:''} • ${sortBy==='gems'?'gem signals first':'distance-sorted'} results`:'Choose a location and start a scan to find real nearby places.'}</p></div><div className="results-tools"><button className="ghost sort-toggle" onClick={()=>setSortBy(sortBy==='gems'?'distance':'gems')} disabled={!data||data.places.every(p=>!p.gem)}>{sortBy==='gems'?'Ⓓ Distance first':'✦ Hidden gems first'}</button><input className="search" aria-label="Search scanned places" placeholder="⌕ Search results" value={search} onChange={e=>setSearch(e.target.value)}/></div></div>
-      <div className="tabs">{categories.map(c=><button key={c.key} className={c.key===category?'active':''} onClick={()=>{setCategory(c.key);setSelected(null)}}>{c.icon} &nbsp; {c.label}</button>)}</div>
+      <section className="results" aria-labelledby="discovery-results-title"><div className="results-header"><div><div className="overline">DISCOVERY RESULTS</div><h2 id="discovery-results-title">{data?`${places.length} places found`:'Your next discovery starts here'}</h2><p>{data?`Source: ${data.source} • ${data.cached?'cached scan':'fresh scan'}${scanDuration!==null&&!data.cached?` • completed in ${prettyElapsed(scanDuration)}`:''} • ${sortBy==='gems'?'gem signals first':'distance-sorted'} results`:'Choose a location and start a scan to find real nearby places.'}</p></div><div className="results-tools"><button className="ghost sort-toggle" aria-pressed={sortBy==='gems'} onClick={()=>setSortBy(sortBy==='gems'?'distance':'gems')} disabled={!data||data.places.every(p=>!p.gem)}>{sortBy==='gems'?'Ⓓ Distance first':'✦ Hidden gems first'}</button><input className="search" aria-label="Search scanned places" placeholder="⌕ Search results" value={search} onChange={e=>setSearch(e.target.value)}/></div></div>
+      <div className="tabs" role="group" aria-label="Filter results by category">{categories.map(c=><button key={c.key} type="button" aria-pressed={c.key===category} className={c.key===category?'active':''} onClick={()=>{setCategory(c.key);setSelected(null)}}>{c.icon} &nbsp; {c.label}</button>)}</div>
+      <p className="sr-only" role="status" aria-live="polite">{selectedPlace?`Selected ${selectedPlace.name}, ${prettyDistance(selectedPlace.distance_m)} away. Place details are shown above the results.`:''}</p>
       {selectedPlace&&<section className="selected-detail" aria-labelledby="selected-place-title">
         <div className={`place-symbol ${selectedPlace.category}`}>{symbol(selectedPlace.category)}</div>
         <div className="selected-detail-body">
-          <div className="selected-detail-top"><div><div className="place-type">{categoryLabel(selectedPlace.category)} · {prettyDistance(selectedPlace.distance_m)} away</div><h3 id="selected-place-title">{selectedPlace.name}</h3></div><button className="detail-close" aria-label="Close place details" onClick={()=>setSelected(null)}>×</button></div>
+          <div className="selected-detail-top"><div><div className="place-type">{categoryLabel(selectedPlace.category)} · {prettyDistance(selectedPlace.distance_m)} away</div><h3 id="selected-place-title">{selectedPlace.name}</h3></div><button className="detail-close" aria-label="Close place details" onClick={()=>{setSelected(null);selectionTrigger.current?.focus();selectionTrigger.current=null}}>×</button></div>
           <div className="place-links detail-links"><a href={selectedPlace.source_url} target="_blank" rel="noopener noreferrer">Open OpenStreetMap record ↗</a><a href={selectedPlace.attribution.url} target="_blank" rel="noopener noreferrer">{selectedPlace.attribution.text} · {selectedPlace.attribution.license} ↗</a>{selectedPlace.website&&<a href={selectedPlace.website} target="_blank" rel="noopener noreferrer">Official website ↗</a>}<button className="favorite-toggle" aria-pressed={favorites.some(favorite=>favorite.id===selectedPlace.id)} onClick={()=>toggleFavorite(selectedPlace)}>{favorites.some(favorite=>favorite.id===selectedPlace.id)?'★ Saved':'☆ Save place'}</button></div>
           {selectedPlace.gem&&<div className="detail-evidence"><div className={`gem-badge ${gemClass(gemTier(selectedPlace.gem.score))}`}>✦ {gemTierLabel(gemTier(selectedPlace.gem.score))} · {selectedPlace.gem.score}/100</div><h4>Why this signal?</h4><ul>{selectedPlace.gem.reasons.map((reason,index)=><li key={`${reason.field_path}-${index}`}><span>{reason.text}</span><code className="gem-tag">{reason.field_path}{reason.observed_value?` = ${reason.observed_value}`:''}</code></li>)}</ul><p className="gem-note">Evidence is from this OpenStreetMap record ({selectedPlace.gem.method}); it is not a popularity or rating score.</p></div>}
         </div>
@@ -211,9 +226,9 @@ export default function App(){
       <div className="places">
         {!data?<div className="empty"><span>✦</span><strong>Ready when you are</strong><p>Scan a region to populate nearby places with source links.</p></div>:
           places.length===0?<div className="empty"><span>⌁</span><strong>No matching places</strong><p>Try another category, query or radius.</p></div>:
-          places.map(p=><article className={`place-card ${p.id===selected?'selected':''}`} key={p.id} onClick={()=>setSelected(p.id)}>
+          places.map(p=><article className={`place-card ${p.id===selected?'selected':''}`} key={p.id}>
             <div className={`place-symbol ${p.category}`}>{symbol(p.category)}</div><div className="place-body">
-            <div className="place-type">{categoryLabel(p.category)}</div><h3>{p.name}</h3><p>◎ &nbsp; {prettyDistance(p.distance_m)} away</p>
+            <div className="place-type">{categoryLabel(p.category)}</div><h3><button type="button" className="place-select" aria-label={`Show ${p.name} on map`} aria-pressed={p.id===selected} onClick={event=>selectPlace(p.id,event.currentTarget)}>{p.name}</button></h3><p>◎ &nbsp; {prettyDistance(p.distance_m)} away</p>
             {p.gem&&(()=>{const tier=gemTier(p.gem!.score);return <>
             <div className={`gem-badge ${gemClass(tier)}`} title="Transparent OSM tag signals — no ratings or reviews">✦ {gemTierLabel(tier)} · {p.gem!.score}/100</div>
             {p.gem!.reasons.length>0&&<details className="gem-why"><summary>Why this signal?</summary><ul>{p.gem!.reasons.map((reason,i)=><li key={i}><span className="gem-reason-text">{reason.text}</span>{reason.observed_value&&<code className="gem-tag">{reason.field_path} = {reason.observed_value}</code>}{!reason.observed_value&&<code className="gem-tag">{reason.field_path}</code>}</li>)}</ul><p className="gem-note">Derived only from this record's OpenStreetMap tags ({p.gem!.method}). No popularity, ratings or reviews are involved.</p></details>}
