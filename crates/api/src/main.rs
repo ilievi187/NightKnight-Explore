@@ -4,6 +4,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+
+use nightknight_explore_api::osm_db::{OsmDatabase, LocalPlace};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -61,6 +63,8 @@ struct AppState {
     last_retry_after: Arc<Mutex<Option<u64>>>,
     /// Google Maps API key, if configured. When None, Google features are disabled.
     google_api_key: Option<String>,
+    /// Local OSM database (optional, for offline discovery without Overpass).
+    osm_db: Option<OsmDatabase>,
 }
 struct CachedScan {
     created: Instant,
@@ -248,6 +252,7 @@ async fn main() {
         endpoint_backoff: Arc::new(Mutex::new(HashMap::new())),
         last_retry_after: Arc::new(Mutex::new(None)),
         google_api_key: env::var("GOOGLE_MAPS_API_KEY").ok(),
+        osm_db: env::var("OSM_DB_PATH").ok().and_then(|path| OsmDatabase::open(std::path::Path::new(&path)).ok()),
     };
     let cors = CorsLayer::new()
         .allow_origin("http://127.0.0.1:5173".parse::<HeaderValue>().unwrap())
@@ -619,6 +624,60 @@ async fn scan(
         return Ok(Json(data));
     }
     drop(cache);
+    // If local OSM database is available, use it instead of Overpass.
+    if let Some(db) = &state.osm_db {
+        let places = db
+            .search_nearby(q.lat, q.lon, radius, 120)
+            .map_err(|e| {
+                error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Local OSM DB error: {}", e))
+            })?;
+        let places: Vec<Place> = places
+            .into_iter()
+            .filter_map(|lp| {
+                // Convert LocalPlace to Place
+                let category = lp.category.clone();
+                let name = lp.name.clone().unwrap_or_else(|| format!("OSM {}", lp.id));
+                let distance = haversine(q.lat, q.lon, lp.lat, lp.lon) as u32;
+                Some(Place {
+                    id: format!("{}-{}", lp.osm_type, lp.id),
+                    name,
+                    category: category.clone(),
+                    lat: lp.lat,
+                    lon: lp.lon,
+                    distance_m: distance,
+                    source: "OpenStreetMap (local)",
+                    source_url: format!("https://www.openstreetmap.org/{}/{}", lp.osm_type, lp.id),
+                    attribution: SourceAttribution {
+                        provider_id: "openstreetmap",
+                        label: "OpenStreetMap",
+                        text: "© OpenStreetMap contributors",
+                        url: "https://www.openstreetmap.org/copyright",
+                        license: "ODbL",
+                    },
+                    website: lp.website.clone(),
+                    gem: None,
+                })
+            })
+            .collect();
+        let mut places = places;
+        places.sort_by_key(|p| p.distance_m);
+        places.truncate(120);
+        let response = ScanResponse {
+            places,
+            scanned_at_unix: now_unix(),
+            source: "OpenStreetMap (local DB)",
+            cached: false,
+        };
+        state.cache.lock().await.insert(
+            key,
+            CachedScan {
+                created: Instant::now(),
+                response: response.clone(),
+            },
+        );
+        return Ok(Json(response));
+    }
+
     // Small shared-service safeguard. The lock is held through request
     // initiation to avoid concurrent requests defeating the cooldown.
     let mut guard = state.last_external_request.lock().await;
@@ -1417,6 +1476,7 @@ mod tests {
             endpoint_backoff: Arc::new(Mutex::new(HashMap::new())),
             last_retry_after: Arc::new(Mutex::new(None)),
             google_api_key: None,
+            osm_db: None,
         }
     }
 
