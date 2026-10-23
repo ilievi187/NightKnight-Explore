@@ -5,7 +5,7 @@ use axum::{
     Json, Router,
 };
 
-use nightknight_explore_api::osm_db::{OsmDatabase, LocalPlace};
+use nightknight_explore_api::osm_db::{LocalPlace, OsmDatabase};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -252,7 +252,9 @@ async fn main() {
         endpoint_backoff: Arc::new(Mutex::new(HashMap::new())),
         last_retry_after: Arc::new(Mutex::new(None)),
         google_api_key: env::var("GOOGLE_MAPS_API_KEY").ok(),
-        osm_db: env::var("OSM_DB_PATH").ok().and_then(|path| OsmDatabase::open(std::path::Path::new(&path)).ok()),
+        osm_db: env::var("OSM_DB_PATH")
+            .ok()
+            .and_then(|path| OsmDatabase::open(std::path::Path::new(&path)).ok()),
     };
     let cors = CorsLayer::new()
         .allow_origin("http://127.0.0.1:5173".parse::<HeaderValue>().unwrap())
@@ -626,11 +628,12 @@ async fn scan(
     drop(cache);
     // If local OSM database is available, use it instead of Overpass.
     if let Some(db) = &state.osm_db {
-        let places = db
-            .search_nearby(q.lat, q.lon, radius, 120)
-            .map_err(|e| {
-                error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Local OSM DB error: {}", e))
-            })?;
+        let places = db.search_nearby(q.lat, q.lon, radius, 120).map_err(|e| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Local OSM DB error: {}", e),
+            )
+        })?;
         let places: Vec<Place> = places
             .into_iter()
             .filter_map(|lp| {

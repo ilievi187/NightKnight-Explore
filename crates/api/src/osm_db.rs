@@ -31,7 +31,9 @@ impl OsmDatabase {
             CREATE INDEX IF NOT EXISTS idx_places_lon ON places(lon);
             CREATE INDEX IF NOT EXISTS idx_places_category ON places(category);",
         )?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     /// Insert a place into the database.
