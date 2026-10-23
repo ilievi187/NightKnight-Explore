@@ -21,3 +21,5 @@ Thumbs.db
 # Windows & test
 *.pdb
 coverage/
+*.tsbuildinfo
+*.tsbuildinfo
