@@ -10,7 +10,7 @@ type GemReason = { text: string; field_path: string; observed_value: string }
 type GemSignal = { score: number; method: string; reasons: GemReason[] }
 type SourceAttribution = { provider_id: string; label: string; text: string; url: string; license: string }
 type Place = { id: string; name: string; category: Exclude<Category,'all'>; lat: number; lon: number; distance_m: number; source: string; source_url: string; attribution: SourceAttribution; website: string | null; gem: GemSignal | null }
-type ScanResponse = { places: Place[]; scanned_at_unix: number; source: string; cached: boolean }
+type ScanResponse = { places: Place[]; scanned_at_unix: number; source: string; cached: boolean; total_matches: number }
 type GeocodePlace = { id: string; display_name: string; lat: number; lon: number; source_url: string }
 type GeocodeResponse = { results: GeocodePlace[]; source: string; attribution: SourceAttribution; cached: boolean }
 type GooglePlace = { id: string; displayName?: { text: string; languageCode?: string }; types?: string[]; rating?: number; userRatingCount?: number; formattedAddress?: string; websiteUri?: string; internationalPhoneNumber?: string; priceLevel?: string; photos?: { name: string; widthPx: number; heightPx: number; authorAttributions?: { displayName: string; uri?: string; photoUri?: string }[] }[] }
@@ -111,6 +111,28 @@ export default function App(){
   const [scanDuration,setScanDuration]=useState<number|null>(null)
   const [locating,setLocating]=useState(false)
   const [selected,setSelected]=useState<string|null>(null)
+  const [offset,setOffset]=useState(0)
+  const loadMore=async()=>{
+    const a=Number(lat), b=Number(lon)
+    if(!validLat(a)||!validLon(b))return
+    setBusy(true)
+    try{
+      const r=await fetch(`/api/scan?lat=${encodeURIComponent(a)}&lon=${encodeURIComponent(b)}&radius_m=${radius}&offset=${offset+120}`,{signal:controller.current?.signal})
+      const payload=await readJsonBody(r)
+      if(!r.ok)throw new Error(scanErrorMessage(r,payload))
+      if(!payload||typeof payload!=='object'||!Array.isArray((payload as ScanResponse).places)){throw new Error('Unexpected response')}
+      const newData=payload as ScanResponse
+      // Append without duplicates
+      setData(prev=>{
+        if(!prev)return newData
+        const existingIds=new Set(prev.places.map(p=>p.id))
+        const newPlaces=newData.places.filter(p=>!existingIds.has(p.id))
+        return {...prev,places:[...prev.places,...newPlaces],cached:newData.cached}
+      })
+      setOffset(prev=>prev+120)
+    }catch(e){if((e as Error).name!=='AbortError')setError((e as Error).message)}
+    finally{setBusy(false)}
+  }
   const selectionTrigger=useRef<HTMLElement|null>(null)
   const controller=useRef<AbortController|null>(null)
   const fetchGoogleDetails=async(placeId:string)=>{
@@ -152,7 +174,7 @@ export default function App(){
     if(!validLat(a)||!validLon(b)||!lat.trim()||!lon.trim()){setError('Enter valid latitude (−90 to 90) and longitude (−180 to 180).');return}
     controller.current?.abort()
     const c=new AbortController();controller.current=c
-    setBusy(true);setError('');setSelected(null);setScanDuration(null)
+    setBusy(true);setError('');setSelected(null);setScanDuration(null);setOffset(0)
     const start=Date.now();setStartedAt(start);setElapsed(0)
     try{
       if(providerMode==='google'&&googleApiKey){
@@ -306,6 +328,7 @@ export default function App(){
             <div className="place-links"><a href={p.source_url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Open record ↗</a><a href={p.attribution.url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>{p.attribution.text} ↗</a>{p.website&&<a href={p.website} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Website ↗</a>}<button className="favorite-toggle" aria-pressed={favorites.some(favorite=>favorite.id===p.id)} onClick={e=>{e.stopPropagation();toggleFavorite(p)}}>{favorites.some(favorite=>favorite.id===p.id)?'★ Saved':'☆ Save place'}</button></div></div>
           </article>)}
       </div></section>
+      {data&&data.places.length<data.total_matches&&<div className="load-more"><button className="ghost" onClick={loadMore} disabled={busy}>{busy?'Loading…':`Load more (${data.total_matches-data.places.length} remaining)`}</button></div>}
       </>}
       {screen==='saved'&&<section className="results saved-results"><div className="results-header"><div><div className="overline">ON THIS DEVICE ONLY</div><h2>Saved place links</h2><p>Only selected OpenStreetMap IDs and source URLs are stored in this browser. Scans and coordinates are not saved.</p></div>{favorites.length>0&&<button className="ghost clear-favorites" onClick={deleteAllFavorites}>Clear all saved places</button>}</div>{error&&<p role="alert" className="error">⚠ {error}</p>}<div className="places">{favorites.length===0?<div className="empty"><span>☆</span><strong>No saved places</strong><p>Save a place from discovery results to keep its OpenStreetMap link here.</p></div>:favorites.map(favorite=><article className="place-card saved-card" key={favorite.id}><div className={`place-symbol ${favorite.category||''}`}>{favorite.category?symbol(favorite.category):'☆'}</div><div className="place-body"><div className="place-type">{favorite.category?categoryLabel(favorite.category):'OpenStreetMap record'}</div><h3 title={favorite.id}>{favorite.name||favorite.id}</h3><div className="place-links"><a href={favorite.source_url} target="_blank" rel="noopener noreferrer">Open record ↗</a><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors ↗</a><button className="favorite-toggle" onClick={()=>deleteFavorite(favorite.id)}>Remove</button></div></div></article>)}</div></section>}
       <footer>NightKnight Explore · Open-source alpha · {providerMode==='google'?'Google Maps Platform (separately licensed) · ':'Places © OpenStreetMap contributors (ODbL) · '}Discover real places with transparent sources.</footer>
