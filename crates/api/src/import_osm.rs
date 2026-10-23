@@ -21,19 +21,35 @@ fn category_from_tags(tags: &[(String, String)]) -> Option<String> {
             _ => {}
         }
     }
-    if tag_map.get("tourism").is_some() {
+    if tag_map.contains_key("tourism") {
         return Some("see".to_string());
     }
-    if tag_map.get("historic").is_some() {
+    if tag_map.contains_key("historic") {
         return Some("history".to_string());
     }
-    if tag_map.get("natural").is_some()
-        || tag_map.get("waterway").is_some()
-        || tag_map.get("leisure").is_some()
+    if tag_map.contains_key("natural")
+        || tag_map.contains_key("waterway")
+        || tag_map.contains_key("leisure")
     {
         return Some("nature".to_string());
     }
     None
+}
+
+fn has_interesting_tags(tags: &[(String, String)]) -> bool {
+    let tag_map: std::collections::HashMap<&str, &str> =
+        tags.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    // Keep unnamed places that have interesting features
+    tag_map.contains_key("historic")
+        || tag_map.contains_key("tourism")
+        || tag_map.contains_key("natural")
+        || tag_map.contains_key("waterway")
+        || tag_map.contains_key("leisure")
+        || tag_map.contains_key("amenity")
+            && (tag_map
+                .get("amenity")
+                .map(|a| *a == "fountain" || *a == "viewpoint" || *a == "memorial")
+                .unwrap_or(false))
 }
 
 fn process_node(db: &OsmDatabase, id: i64, lat: f64, lon: f64, tags: &[(String, String)]) {
@@ -42,6 +58,10 @@ fn process_node(db: &OsmDatabase, id: i64, lat: f64, lon: f64, tags: &[(String, 
             .iter()
             .find(|(k, _)| k == "name")
             .map(|(_, v)| v.as_str());
+        // Skip unnamed places unless they have interesting features
+        if name.is_none() && !has_interesting_tags(tags) {
+            return;
+        }
         let wikidata = tags
             .iter()
             .find(|(k, _)| k == "wikidata")

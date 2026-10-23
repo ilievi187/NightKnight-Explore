@@ -37,6 +37,7 @@ impl OsmDatabase {
     }
 
     /// Insert a place into the database.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_place(
         &self,
         osm_type: &str,
@@ -62,32 +63,33 @@ impl OsmDatabase {
     }
 
     /// Search for places within a radius of given coordinates.
+    /// Returns (places, total_count) where total_count is the number of all
+    /// matching places (before limit) and places is the paginated subset.
     pub fn search_nearby(
         &self,
         lat: f64,
         lon: f64,
         radius_m: u32,
         limit: usize,
-    ) -> SqlResult<Vec<LocalPlace>> {
+        offset: usize,
+    ) -> SqlResult<(Vec<LocalPlace>, usize)> {
         let conn = self.conn.lock().unwrap();
         let lat_delta = radius_m as f64 / 111_000.0;
         let lon_delta = radius_m as f64 / (111_000.0 * lat.to_radians().cos().abs().max(0.01));
 
+        // Fetch all candidates in bounding box (no LIMIT) for accurate filtering
         let mut stmt = conn.prepare(
             "SELECT id, osm_type, lat, lon, name, category, tags, wikidata, wikipedia, website, phone, opening_hours
              FROM places
-             WHERE lat BETWEEN ?1 AND ?2 AND lon BETWEEN ?3 AND ?4
-             LIMIT ?5",
+             WHERE lat BETWEEN ?1 AND ?2 AND lon BETWEEN ?3 AND ?4",
         )?;
 
-        let limit_i64 = (limit * 4) as i64;
         let rows = stmt.query_map(
             rusqlite::params![
                 lat - lat_delta,
                 lat + lat_delta,
                 lon - lon_delta,
                 lon + lon_delta,
-                limit_i64,
             ],
             |row| {
                 Ok(LocalPlace {
@@ -115,9 +117,22 @@ impl OsmDatabase {
                 results.push((place, dist));
             }
         }
-        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        results.truncate(limit);
-        Ok(results.into_iter().map(|(p, _)| p).collect())
+        // Sort by distance (nearest first), then by ID for determinism
+        results.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.id.cmp(&b.0.id))
+        });
+
+        let total = results.len();
+        let paginated: Vec<LocalPlace> = results
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(p, _)| p)
+            .collect();
+
+        Ok((paginated, total))
     }
 
     /// Get total place count.
