@@ -13,8 +13,8 @@ type Place = { id: string; name: string; category: Exclude<Category,'all'>; lat:
 type ScanResponse = { places: Place[]; scanned_at_unix: number; source: string; cached: boolean }
 type GeocodePlace = { id: string; display_name: string; lat: number; lon: number; source_url: string }
 type GeocodeResponse = { results: GeocodePlace[]; source: string; attribution: SourceAttribution; cached: boolean }
-type GooglePlace = { place_id: string; name: string; types: string[]; rating?: number; user_ratings_total?: number; formatted_address?: string; website?: string; phone_number?: string; price_level?: number; photo_references?: string[] }
-type GooglePlaceDetails = { name: string; rating?: number; user_ratings_total?: number; formatted_address?: string; website?: string; phone_number?: string; price_level?: number; opening_hours?: { open_now?: boolean; periods?: { open: boolean; close: { time: number } }[] }; review?: { author_name: string; rating: number; text: string; relative_time_description: string }[]; photos?: { photo_reference: string; width: number; height: number }[] }
+type GooglePlace = { id: string; displayName?: { text: string; languageCode?: string }; types?: string[]; rating?: number; userRatingCount?: number; formattedAddress?: string; websiteUri?: string; internationalPhoneNumber?: string; priceLevel?: string; photos?: { name: string; widthPx: number; heightPx: number; authorAttributions?: { displayName: string; uri?: string; photoUri?: string }[] }[] }
+type GooglePlaceDetails = { id?: string; displayName?: { text: string; languageCode?: string }; rating?: number; userRatingCount?: number; formattedAddress?: string; websiteUri?: string; internationalPhoneNumber?: string; priceLevel?: string; regularOpeningHours?: { openNow?: boolean; periods?: { open: { day: number; hour: number; minute: number }; close: { day: number; hour: number; minute: number } }[]; weekdayDescriptions?: string[] }; reviews?: { authorAttribution?: { displayName: string; uri?: string; photoUri?: string }; rating?: number; text?: { text: string; languageCode?: string }; relativePublishTimeDescription?: string; publishTime?: string }[]; photos?: { name: string; widthPx: number; heightPx: number; authorAttributions?: { displayName: string; uri?: string; photoUri?: string }[] }[] }
 const categories: { key: Category; label: string; icon: string }[] = [
   {key:'all',label:'Everything',icon:'✦'}, {key:'see',label:'Attractions',icon:'⌁'},
   {key:'history',label:'Historical',icon:'⌂'}, {key:'nature',label:'Nature',icon:'❧'},
@@ -100,6 +100,7 @@ export default function App(){
   const [search,setSearch]=useState('')
   const [sortBy,setSortBy]=useState<'distance'|'gems'>('distance')
   const [data,setData]=useState<ScanResponse|null>(null)
+  const [googleFavorites,setGoogleFavorites]=useState<string[]>(()=>{try{return JSON.parse(localStorage.getItem('nightknight-explore:google-favorites')||'[]')}catch{return []}})
   const [googlePlaces,setGooglePlaces]=useState<GooglePlace[]>([])
   const [googleDetails,setGoogleDetails]=useState<GooglePlaceDetails|null>(null)
   const [googleDetailsLoading,setGoogleDetailsLoading]=useState(false)
@@ -159,8 +160,9 @@ export default function App(){
         const r=await fetch('/api/google/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lat:a,lon:b,radius_m:radius,max_results:20}),signal:c.signal})
         const payload=await readJsonBody(r)
         if(!r.ok)throw new Error(scanErrorMessage(r,payload))
-        if(!Array.isArray(payload)){throw new Error('Google Places returned an unexpected response. Check that the API version matches the web app.')}
-        setGooglePlaces(payload as GooglePlace[])
+        if(!Array.isArray(payload)&&!(payload as any)?.places){throw new Error('Google Places returned an unexpected response. Check that the API version matches the web app.')}
+        const places = (payload as any)?.places || payload
+        setGooglePlaces(places as GooglePlace[])
         setData(null) // Clear OSM data
         setScanDuration(Date.now()-start)
       } else {
@@ -250,7 +252,7 @@ export default function App(){
           {busy&&<p role="status" className="scan-progress" aria-live="polite">⌛ {scanProgressNote(elapsed,isCached)} ({prettyElapsed(elapsed)})</p>}
           {error&&<p role="alert" className="error">⚠ {error}</p>}
         </div>
-        <div className="panel map-panel"><div className="map-heading"><div><span className="overline">GEOSPATIAL VIEW</span><h2>Area overview</h2></div><span className="map-chip">◉ LIVE MAP</span></div>{providerMode==='google'&&googleApiKey?<GoogleMap lat={Number(lat)} lon={Number(lon)} apiKey={googleApiKey}/>:<ExploreMap places={places} lat={Number(lat)} lon={Number(lon)} selected={selected} onSelect={selectPlace}/>}
+        <div className="panel map-panel"><div className="map-heading"><div><span className="overline">GEOSPATIAL VIEW</span><h2>Area overview</h2></div><span className="map-chip">◉ LIVE MAP</span></div>{providerMode==='google'&&googleApiKey?<GoogleMap lat={Number(lat)} lon={Number(lon)} apiKey={googleApiKey} places={googlePlaces} selectedId={selected} onSelect={(id)=>{fetchGoogleDetails(id);setSelected(id)}}/>:<ExploreMap places={places} lat={Number(lat)} lon={Number(lon)} selected={selected} onSelect={selectPlace}/>}
         </div>
       </section>
       <section className="results" aria-labelledby="discovery-results-title"><div className="results-header"><div><div className="overline">DISCOVERY RESULTS</div><h2 id="discovery-results-title">{data?`${places.length} places found`:'Your next discovery starts here'}</h2><p>{data?`Source: ${data.source} • ${data.cached?'cached scan':'fresh scan'}${scanDuration!==null&&!data.cached?` • completed in ${prettyElapsed(scanDuration)}`:''} • ${sortBy==='gems'?'gem signals first':'distance-sorted'} results`:'Choose a location and start a scan to find real nearby places.'}</p></div><div className="results-tools"><button className="ghost sort-toggle" aria-pressed={sortBy==='gems'} onClick={()=>setSortBy(sortBy==='gems'?'distance':'gems')} disabled={!data||data.places.every(p=>!p.gem)}>{sortBy==='gems'?'Ⓓ Distance first':'✦ Hidden gems first'}</button><input className="search" aria-label="Search scanned places" placeholder="⌕ Search results" value={search} onChange={e=>setSearch(e.target.value)}/></div></div>
@@ -258,15 +260,16 @@ export default function App(){
       <p className="sr-only" role="status" aria-live="polite">{selectedPlace?`Selected ${selectedPlace.name}, ${prettyDistance(selectedPlace.distance_m)} away. Place details are shown above the results.`:''}</p>
       {googleDetails&&<section className="selected-detail" aria-labelledby="google-place-title">
         <div className="selected-detail-body">
-          <div className="selected-detail-top"><div><div className="place-type">Google Place</div><h3 id="google-place-title">{googleDetails.name}</h3></div><button className="detail-close" aria-label="Close place details" onClick={()=>setGoogleDetails(null)}>×</button></div>
-          {googleDetails.rating&&<p>★ {googleDetails.rating} ({googleDetails.user_ratings_total||0} reviews)</p>}
-          {googleDetails.formatted_address&&<p>{googleDetails.formatted_address}</p>}
-          {googleDetails.opening_hours?.open_now!==undefined&&<p>{googleDetails.opening_hours.open_now?'Open now':'Closed'}</p>}
-          {googleDetails.website&&<a href={googleDetails.website} target="_blank" rel="noopener noreferrer">Website ↗</a>}
-          {googleDetails.phone_number&&<p>{googleDetails.phone_number}</p>}
-          {googleDetails.review&&googleDetails.review.length>0&&<div className="google-reviews"><h4>Reviews (up to 5 from Google)</h4>{googleDetails.review.map((r,i)=><div key={i} className="review"><strong>{r.author_name}</strong> ★{r.rating}<p>{r.text}</p><small>{r.relative_time_description}</small></div>)}</div>}
-          {googleDetails.photos&&googleDetails.photos.length>0&&<div className="google-photos"><h4>Photos</h4>{googleDetails.photos.map((p,i)=><img key={i} src={`https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photoreference=${p.photo_reference}&key=${googleApiKey}`} alt={`Photo ${i+1}`} loading="lazy"/>)}</div>}
-          <div className="place-links detail-links"><a href={`https://www.google.com/maps/place/?q=place_id:${googlePlaces.find(gp=>gp.name===googleDetails.name)?.place_id}`} target="_blank" rel="noopener noreferrer">Open in Google Maps ↗</a><a href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(googleDetails.formatted_address||googleDetails.name)}`} target="_blank" rel="noopener noreferrer">Directions ↗</a></div>
+          <div className="selected-detail-top"><div><div className="place-type">Google Place</div><h3 id="google-place-title">{googleDetails.displayName?.text||'Unknown'}</h3></div><button className="detail-close" aria-label="Close place details" onClick={()=>setGoogleDetails(null)}>×</button></div>
+          {googleDetails.rating&&<p>★ {googleDetails.rating} ({googleDetails.userRatingCount||0} reviews)</p>}
+          {googleDetails.formattedAddress&&<p>{googleDetails.formattedAddress}</p>}
+          {googleDetails.regularOpeningHours?.openNow!==undefined&&<p>{googleDetails.regularOpeningHours.openNow?'Open now':'Closed'}</p>}
+          {googleDetails.websiteUri&&<a href={googleDetails.websiteUri} target="_blank" rel="noopener noreferrer">Website ↗</a>}
+          {googleDetails.internationalPhoneNumber&&<p>{googleDetails.internationalPhoneNumber}</p>}
+          {googleDetails.priceLevel&&<p>Price level: {googleDetails.priceLevel}</p>}
+          {googleDetails.reviews&&googleDetails.reviews.length>0&&<div className="google-reviews"><h4>Reviews (up to 5 from Google)</h4>{googleDetails.reviews.map((r,i)=><div key={i} className="review"><strong>{r.authorAttribution?.displayName||'Anonymous'}</strong> ★{r.rating}<p>{r.text?.text||''}</p><small>{r.relativePublishTimeDescription||''}</small></div>)}</div>}
+          {googleDetails.photos&&googleDetails.photos.length>0&&<div className="google-photos"><h4>Photos</h4>{googleDetails.photos.map((p,i)=><div key={i} className="google-photo"><img src={`/api/google/photo?name=${encodeURIComponent(p.name)}&maxWidthPx=400`} alt={`Photo ${i+1} by ${p.authorAttributions?.[0]?.displayName||'Unknown'}`} loading="lazy"/><small>Photo by {p.authorAttributions?.[0]?.displayName||'Unknown'}</small></div>)}</div>}
+          <div className="place-links detail-links"><a href={`https://www.google.com/maps/place/?q=place_id:${googleDetails.id}`} target="_blank" rel="noopener noreferrer">Open in Google Maps ↗</a><a href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(googleDetails.formattedAddress||googleDetails.displayName?.text||'')}`} target="_blank" rel="noopener noreferrer">Directions ↗</a></div>
         </div>
       </section>}
       {selectedPlace&&<section className="selected-detail" aria-labelledby="selected-place-title">
@@ -278,16 +281,16 @@ export default function App(){
         </div>
       </section>}
       <div className="places">
-        {providerMode==='google'&&googlePlaces.length>0?googlePlaces.map(gp=><article className="place-card" key={gp.place_id}>
+        {providerMode==='google'&&googlePlaces.length>0?googlePlaces.map(gp=><article className="place-card" key={gp.id}>
           <div className="place-symbol see">📍</div><div className="place-body">
-          <div className="place-type">{gp.types?.[0]||'Place'}{gp.rating?` · ★ ${gp.rating} (${gp.user_ratings_total||0})`:''}</div>
-          <h3><button type="button" className="place-select" onClick={()=>{fetchGoogleDetails(gp.place_id);setSelected(gp.place_id)}}>{gp.name}</button></h3>
-          {gp.formatted_address&&<p>◎ &nbsp; {gp.formatted_address}</p>}
-          {gp.price_level!==undefined&&<p>Price level: {gp.price_level}</p>}
+          <div className="place-type">{gp.types?.[0]||'Place'}{gp.rating?` · ★ ${gp.rating} (${gp.userRatingCount||0})`:''}</div>
+          <h3><button type="button" className="place-select" onClick={()=>{fetchGoogleDetails(gp.id);setSelected(gp.id)}}>{gp.displayName?.text||'Unknown'}</button></h3>
+          {gp.formattedAddress&&<p>◎ &nbsp; {gp.formattedAddress}</p>}
+          {gp.priceLevel&&<p>Price level: {gp.priceLevel}</p>}
           <div className="place-links">
-            <a href={`https://www.google.com/maps/place/?q=place_id:${gp.place_id}`} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Open in Google Maps ↗</a>
-            {gp.website&&<a href={gp.website} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Website ↗</a>}
-            <button className="favorite-toggle" onClick={e=>{e.stopPropagation()}}>☆ Save place</button>
+            <a href={`https://www.google.com/maps/place/?q=place_id:${gp.id}`} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Open in Google Maps ↗</a>
+            {gp.websiteUri&&<a href={gp.websiteUri} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Website ↗</a>}
+            <button className="favorite-toggle" onClick={e=>{e.stopPropagation();const next=googleFavorites.includes(gp.id)?googleFavorites.filter(id=>id!==gp.id):[...googleFavorites,gp.id];setGoogleFavorites(next);localStorage.setItem('nightknight-explore:google-favorites',JSON.stringify(next))}}>{googleFavorites.includes(gp.id)?'★ Saved':'☆ Save place'}</button>
           </div>
           </div>
         </article>):
