@@ -17,8 +17,10 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 const OVERPASS_CACHE_TTL: Duration = Duration::from_secs(900);
 /// Local safeguard between this server and shared endpoints.
 const COOLDOWN: Duration = Duration::from_secs(8);
-/// Overpass query processing timeout; the client must wait at least this long.
-const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(35);
+/// Overpass query processing timeout; the client must wait at least this
+/// long. The server-side query ([timeout:35]) aborts slightly earlier and
+/// reports the timeout via `remark`, enabling faster failover.
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(40);
 /// Connection setup timeout so dead DNS/hosts fail fast instead of hanging.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Small backoff between attempts against the same endpoint.
@@ -28,7 +30,7 @@ const RATE_LIMIT_WAIT_CAP: Duration = Duration::from_secs(8);
 /// After an endpoint fails, avoid it for a while instead of hammering it.
 const ENDPOINT_FAILURE_PENALTY: Duration = Duration::from_secs(30);
 /// Overall cap on the failover chain so one scan never stalls indefinitely.
-const MAX_ATTEMPT_WINDOW: Duration = Duration::from_secs(110);
+const MAX_ATTEMPT_WINDOW: Duration = Duration::from_secs(120);
 
 /// Public Overpass services used in order when no explicit endpoint is
 /// configured. Each is an independent shared resource; failover spreads load
@@ -82,6 +84,36 @@ struct Place {
     source_url: String,
     attribution: SourceAttribution,
     website: Option<String>,
+    /// Present only when the record's own OSM tags support at least one
+    /// documented Hidden Gems signal. `None` is an honest "no gem signal",
+    /// not a synthesized zero.
+    gem: Option<GemSignal>,
+}
+
+/// Transparent, evidence-anchored "Hidden Gems" signal for one place.
+/// Every score contribution is derived from a concrete OSM tag on the
+/// record; nothing is popularity-, review- or ranking-based. See
+/// docs/hidden-gems-method.md.
+#[derive(Serialize, Clone)]
+struct GemSignal {
+    /// 0–100 deterministic tag-based interest score (method v1).
+    score: u8,
+    /// Stable identifier of the scoring method that produced this signal.
+    method: &'static str,
+    /// Each reason states the tag that produced it and what it means.
+    reasons: Vec<GemReason>,
+}
+
+/// One explained contribution to a Hidden Gems score, tied to the exact
+/// provider field that supports it.
+#[derive(Serialize, Clone, PartialEq)]
+struct GemReason {
+    /// Plain-language, non-definitive explanation of the signal.
+    text: String,
+    /// Provider field path that supports the claim, e.g. `tags.historic`.
+    field_path: &'static str,
+    /// The observed tag value.
+    observed_value: String,
 }
 #[derive(Serialize, Clone)]
 struct ScanResponse {
@@ -100,6 +132,7 @@ struct ApiError {
 #[derive(Deserialize)]
 struct OverpassResponse {
     elements: Vec<OverpassElement>,
+    remark: Option<String>,
 }
 #[derive(Deserialize)]
 struct OverpassElement {
@@ -301,10 +334,19 @@ async fn scan(
 }
 
 /// POST form body Overpass query. POST rather than enormous query strings;
-/// no browser-to-Overpass CORS required.
+/// no browser-to-Overpass CORS required. Selectors cover food/stay/see plus
+/// the historical, natural and cultural record types the Hidden Gems signal
+/// evaluates.
 fn overpass_query(lat: f64, lon: f64, radius: u32) -> String {
     format!(
-        "[out:json][timeout:20];(nwr(around:{radius},{lat},{lon})[\"amenity\"~\"^(restaurant|cafe|bar|pub)$\"];nwr(around:{radius},{lat},{lon})[\"tourism\"~\"^(hotel|guest_house|hostel|attraction|museum|viewpoint|artwork|gallery)$\"];);out center;",
+        "[out:json][timeout:35];(\
+nwr(around:{radius},{lat},{lon})[\"amenity\"~\"^(restaurant|cafe|bar|pub)$\"];\
+nwr(around:{radius},{lat},{lon})[\"tourism\"~\"^(hotel|guest_house|hostel|attraction|museum|viewpoint|artwork|gallery)$\"];\
+nwr(around:{radius},{lat},{lon})[\"historic\"~\"^(monument|memorial|castle|ruins|ruin|archaeological_site|monastery|fort|tower)$\"];\
+nwr(around:{radius},{lat},{lon})[\"natural\"~\"^(beach|spring|cave_entrance)$\"];\
+nwr(around:{radius},{lat},{lon})[\"waterway\"=\"waterfall\"];\
+nwr(around:{radius},{lat},{lon})[\"leisure\"=\"garden\"];\
+);out center;",
     )
 }
 
@@ -347,6 +389,22 @@ async fn fetch_overpass(
                 Err(OverpassFailure::RateLimited) => {
                     tracing::warn!(endpoint, "Overpass rate limited this client");
                     last_failure = Some(OverpassFailure::RateLimited);
+                }
+                // A stalled upstream is not worth a second wait: move on to
+                // the next endpoint immediately.
+                Err(failure @ OverpassFailure::TimedOut) => {
+                    tracing::warn!(
+                        endpoint,
+                        failure = failure.code(),
+                        "Overpass attempt timed out"
+                    );
+                    state
+                        .endpoint_backoff
+                        .lock()
+                        .await
+                        .insert(endpoint.clone(), Instant::now() + ENDPOINT_FAILURE_PENALTY);
+                    last_failure = Some(failure);
+                    break;
                 }
                 Err(failure) => {
                     tracing::warn!(
@@ -407,6 +465,19 @@ async fn attempt_overpass(
         tracing::warn!(endpoint, "Overpass returned unparseable content");
         OverpassFailure::InvalidResponse
     })?;
+    // Overpass reports query failures inside a 200 response via `remark`.
+    // A timed-out server-side query is a provider timeout, not a successful
+    // empty scan.
+    if let Some(remark) = &payload.remark {
+        if remark.contains("timed out") || remark.contains("timeout") {
+            tracing::warn!(endpoint, remark, "Overpass server-side query timeout");
+            return Err(OverpassFailure::TimedOut);
+        }
+        if remark.contains("runtime error") || remark.contains("static error") {
+            tracing::warn!(endpoint, remark, "Overpass reported a query error");
+            return Err(OverpassFailure::InvalidResponse);
+        }
+    }
     Ok(payload)
 }
 
@@ -501,6 +572,7 @@ fn to_place(el: OverpassElement, center_lat: f64, center_lon: f64, radius: u32) 
         .get("website")
         .or_else(|| tags.get("contact:website"))
         .and_then(|url| safe_website(url));
+    let gem = assess_gem(&tags);
     Some(Place {
         id: format!("{}-{}", el.kind, el.id),
         name,
@@ -518,6 +590,7 @@ fn to_place(el: OverpassElement, center_lat: f64, center_lon: f64, radius: u32) 
             license: "ODbL-1.0",
         },
         website,
+        gem,
     })
 }
 fn category(tags: &HashMap<String, String>) -> &'static str {
@@ -527,8 +600,210 @@ fn category(tags: &HashMap<String, String>) -> &'static str {
     match tags.get("tourism").map(String::as_str) {
         Some("hotel" | "guest_house" | "hostel") => "stay",
         Some("attraction" | "museum" | "viewpoint" | "artwork" | "gallery") => "see",
-        _ => "other",
+        _ => {
+            if matches!(
+                tags.get("historic").map(String::as_str),
+                Some(
+                    "monument"
+                        | "memorial"
+                        | "castle"
+                        | "ruins"
+                        | "ruin"
+                        | "archaeological_site"
+                        | "monastery"
+                        | "fort"
+                        | "tower"
+                )
+            ) {
+                "history"
+            } else if matches!(
+                tags.get("natural").map(String::as_str),
+                Some("beach" | "spring" | "cave_entrance")
+            ) || tags.get("waterway").map(String::as_str) == Some("waterfall")
+                || tags.get("leisure").map(String::as_str) == Some("garden")
+            {
+                "nature"
+            } else {
+                "other"
+            }
+        }
     }
+}
+
+/// Stable URL-safe Wikipedia/Wikidata-style site flag for documentation
+/// signals.
+fn documented(tags: &HashMap<String, String>) -> bool {
+    ["wikidata", "wikipedia", "image"]
+        .iter()
+        .any(|key| tags.get(*key).is_some_and(|value| !value.trim().is_empty()))
+}
+
+/// Derive the transparent Hidden Gems signal from the record's own tags
+/// (method `osm-tag-signals-v1`). Returns `None` when no documented signal
+/// applies, so the absence of a gem is never fabricated.
+fn assess_gem(tags: &HashMap<String, String>) -> Option<GemSignal> {
+    let mut reasons: Vec<GemReason> = Vec::new();
+    let mut score: u16 = 0;
+    fn add(
+        points: u16,
+        reasons: &mut Vec<GemReason>,
+        score: &mut u16,
+        path: &'static str,
+        value: String,
+        text: String,
+    ) {
+        *score += points;
+        reasons.push(GemReason {
+            text,
+            field_path: path,
+            observed_value: value,
+        });
+    }
+
+    match tags.get("historic").map(String::as_str) {
+        Some("monument" | "memorial") => add(
+            25,
+            &mut reasons,
+            &mut score,
+            "tags.historic",
+            tags["historic"].clone(),
+            "Tagged in OSM as a monument or memorial — a historical landmark.".to_owned(),
+        ),
+        Some("castle" | "fort" | "monastery" | "tower") => add(
+            25,
+            &mut reasons,
+            &mut score,
+            "tags.historic",
+            tags["historic"].clone(),
+            "Tagged in OSM as a castle, fort, monastery or tower — a historical structure."
+                .to_owned(),
+        ),
+        Some("ruins" | "ruin") => add(
+            25,
+            &mut reasons,
+            &mut score,
+            "tags.historic",
+            tags["historic"].clone(),
+            "Tagged in OSM as ruins — condition varies; verify before visiting.".to_owned(),
+        ),
+        Some("archaeological_site") => add(
+            25,
+            &mut reasons,
+            &mut score,
+            "tags.historic",
+            tags["historic"].clone(),
+            "Tagged in OSM as an archaeological site.".to_owned(),
+        ),
+        _ => {}
+    }
+    match tags.get("tourism").map(String::as_str) {
+        Some("viewpoint") => add(
+            15,
+            &mut reasons,
+            &mut score,
+            "tags.tourism",
+            "viewpoint".to_owned(),
+            "Tagged in OSM as a viewpoint — a vantage point noted by mappers.".to_owned(),
+        ),
+        Some("artwork") => add(
+            15,
+            &mut reasons,
+            &mut score,
+            "tags.tourism",
+            "artwork".to_owned(),
+            "Tagged in OSM as public artwork.".to_owned(),
+        ),
+        _ => {}
+    }
+    if matches!(
+        tags.get("abandoned").map(String::as_str),
+        Some("yes") | Some("true") | Some("1")
+    ) {
+        add(
+            20,
+            &mut reasons,
+            &mut score,
+            "tags.abandoned",
+            "yes".to_owned(),
+            "Tagged in OSM as abandoned — mapped as derelict; verify on site.".to_owned(),
+        );
+    } else if matches!(
+        tags.get("disused").map(String::as_str),
+        Some("yes") | Some("true") | Some("1")
+    ) {
+        add(
+            20,
+            &mut reasons,
+            &mut score,
+            "tags.disused",
+            "yes".to_owned(),
+            "Tagged in OSM as disused — no longer in operation; verify on site.".to_owned(),
+        );
+    }
+    if let Some("beach" | "spring" | "cave_entrance") = tags.get("natural").map(String::as_str) {
+        add(
+            10,
+            &mut reasons,
+            &mut score,
+            "tags.natural",
+            tags["natural"].clone(),
+            format!(
+                "Tagged in OSM as a natural {}.",
+                tags["natural"].replace('_', " ")
+            ),
+        );
+    }
+    if tags.get("waterway").map(String::as_str) == Some("waterfall") {
+        add(
+            10,
+            &mut reasons,
+            &mut score,
+            "tags.waterway",
+            "waterfall".to_owned(),
+            "Tagged in OSM as a waterfall.".to_owned(),
+        );
+    }
+    if tags.get("leisure").map(String::as_str) == Some("garden") {
+        add(
+            10,
+            &mut reasons,
+            &mut score,
+            "tags.leisure",
+            "garden".to_owned(),
+            "Tagged in OSM as a garden.".to_owned(),
+        );
+    }
+    if documented(tags) {
+        add(
+            10,
+            &mut reasons,
+            &mut score,
+            "tags.wikidata|wikipedia|image",
+            String::new(),
+            "Record links documentation (an image, Wikipedia or Wikidata entry).".to_owned(),
+        );
+    }
+    if tags
+        .get("description")
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        add(
+            5,
+            &mut reasons,
+            &mut score,
+            "tags.description",
+            String::new(),
+            "Carries an OSM description field.".to_owned(),
+        );
+    }
+    if reasons.is_empty() {
+        return None;
+    }
+    Some(GemSignal {
+        score: score.min(100) as u8,
+        method: "osm-tag-signals-v1",
+        reasons,
+    })
 }
 fn safe_website(url: &str) -> Option<String> {
     let v = url.trim();
@@ -613,6 +888,16 @@ mod tests {
                 retry_after: None,
                 body: CAFE_FIXTURE,
                 delay: Some(delay_millis),
+            }
+        }
+        /// Overpass-style failure: HTTP 200 with a runtime timeout remark
+        /// inside the JSON body.
+        fn remark_timeout() -> Self {
+            Self {
+                status: 200,
+                retry_after: None,
+                body: r#"{"elements":[],"remark":"runtime error: Query timed out in \"recurse\" at line 1"}"#,
+                delay: None,
             }
         }
     }
@@ -772,6 +1057,107 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gem_signal_is_absent_without_supporting_tags() {
+        let mut m = HashMap::new();
+        m.insert("amenity".into(), "cafe".into());
+        m.insert("name".into(), "Plain cafe".into());
+        assert!(assess_gem(&m).is_none());
+    }
+
+    #[test]
+    fn gem_signal_is_transparent_and_evidence_anchored() {
+        let mut m = HashMap::new();
+        m.insert("historic".into(), "castle".into());
+        let gem = assess_gem(&m).unwrap();
+        assert_eq!(gem.method, "osm-tag-signals-v1");
+        assert_eq!(gem.score, 25);
+        assert_eq!(gem.reasons.len(), 1);
+        assert_eq!(gem.reasons[0].field_path, "tags.historic");
+        assert_eq!(gem.reasons[0].observed_value, "castle");
+        // The explanation names the tag, not any popularity claim.
+        assert!(gem.reasons[0].text.contains("castle"));
+    }
+
+    #[test]
+    fn gem_dereliction_wording_avoids_definitive_claims() {
+        let mut m = HashMap::new();
+        m.insert("abandoned".into(), "yes".into());
+        let gem = assess_gem(&m).unwrap();
+        assert!(gem
+            .reasons
+            .iter()
+            .all(|reason| !reason.text.contains("is abandoned")));
+        assert!(gem.reasons[0].text.contains("verify on site"));
+    }
+
+    #[test]
+    fn gem_score_combines_and_caps_at_one_hundred() {
+        let mut m = HashMap::new();
+        m.insert("historic".into(), "ruins".into());
+        m.insert("abandoned".into(), "yes".into());
+        m.insert("disused".into(), "yes".into());
+        m.insert("tourism".into(), "viewpoint".into());
+        m.insert("natural".into(), "cave_entrance".into());
+        m.insert("waterway".into(), "waterfall".into());
+        m.insert("leisure".into(), "garden".into());
+        m.insert("wikidata".into(), "Q42".into());
+        m.insert("description".into(), "A curious spot.".into());
+        let gem = assess_gem(&m).unwrap();
+        assert!(gem.score <= 100);
+        // 25+20+15+10+10+10+10+5 = 105 raw (abandoned and disused share one
+        // dereliction signal), capped to 100.
+        assert_eq!(gem.score, 100);
+        assert_eq!(gem.reasons.len(), 8);
+        assert_eq!(gem.reasons[0].observed_value, "ruins");
+        assert!(matches!(category(&m), "history" | "nature" | "see"));
+    }
+
+    #[test]
+    fn expanded_categories_map_records() {
+        let historic: HashMap<String, String> = [("historic".to_owned(), "monument".to_owned())]
+            .into_iter()
+            .collect();
+        assert_eq!(category(&historic), "history");
+
+        let natural: HashMap<String, String> = [("waterway".to_owned(), "waterfall".to_owned())]
+            .into_iter()
+            .collect();
+        assert_eq!(category(&natural), "nature");
+
+        let garden: HashMap<String, String> = [("leisure".to_owned(), "garden".to_owned())]
+            .into_iter()
+            .collect();
+        assert_eq!(category(&garden), "nature");
+
+        let tavern: HashMap<String, String> = [
+            ("amenity".to_owned(), "restaurant".to_owned()),
+            ("historic".to_owned(), "memorial".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(category(&tavern), "food");
+    }
+
+    #[test]
+    fn gem_carrying_place_is_returned_by_to_place() {
+        let mut tags = HashMap::new();
+        tags.insert("name".into(), "Old Bastion".into());
+        tags.insert("historic".into(), "tower".into());
+        let element = OverpassElement {
+            kind: "node".into(),
+            id: 77,
+            lat: Some(43.0),
+            lon: Some(27.0),
+            center: None,
+            tags: Some(tags),
+        };
+        let place = to_place(element, 43.0, 27.0, 500).unwrap();
+        let gem = place.gem.expect("historic tower must carry a gem signal");
+        assert_eq!(gem.score, 25);
+        assert_eq!(&gem.reasons[0].field_path, &"tags.historic");
+    }
+
     #[tokio::test]
     async fn failover_recovers_from_primary_endpoint_failure() {
         let (broken, broken_hits) = mock_overpass(vec![ScriptEntry::status(500)]).await;
@@ -838,5 +1224,37 @@ mod tests {
         let result = fetch_overpass(&state, "[out:json];out;").await;
 
         assert!(matches!(result, Err(OverpassFailure::TimedOut)));
+    }
+
+    #[tokio::test]
+    async fn remark_timeout_is_not_a_successful_empty_scan() {
+        let (endpoint, _) = mock_overpass(vec![ScriptEntry::remark_timeout()]).await;
+        let state = test_state(vec![endpoint], 20_000);
+
+        let result = fetch_overpass(&state, "[out:json];out;").await;
+
+        assert!(
+            matches!(result, Err(OverpassFailure::TimedOut)),
+            "a 200 response carrying a server-side timeout remark must surface as provider_timeout, not as an empty success"
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_out_endpoint_is_failed_over_without_waiting_for_a_retry() {
+        let (slow, slow_hits) = mock_overpass(vec![ScriptEntry::slow_ok(1_000)]).await;
+        let (working, _) = mock_overpass(vec![ScriptEntry::ok()]).await;
+        let state = test_state(vec![slow, working], 200);
+
+        let result = fetch_overpass(&state, "[out:json];out;").await;
+
+        assert!(
+            result.is_ok(),
+            "failover must still reach the healthy endpoint"
+        );
+        assert_eq!(
+            slow_hits.load(Ordering::SeqCst),
+            1,
+            "a stalled endpoint gets one attempt, not a retry"
+        );
     }
 }
