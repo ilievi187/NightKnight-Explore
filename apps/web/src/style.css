@@ -5,3 +5,4 @@
 .gem-why{margin-top:9px;font-size:11px}.gem-why summary{cursor:pointer;color:#75d5ff;font-size:10px;letter-spacing:.8px}.gem-why[open] summary{margin-bottom:8px}.gem-why ul{margin:0;padding-left:16px;color:#a9c4d8;display:flex;flex-direction:column;gap:6px}.gem-reason-text{display:block}.gem-tag{display:inline-block;margin-top:2px;font-size:9px;color:#6699bd;background:#0c1c2b;border:1px solid #1b2e45;border-radius:5px;padding:2px 6px}.gem-note{margin:9px 0 0;color:#6b859e;font-size:9.5px;line-height:1.5}
 .map-origin{width:14px;height:14px;border:2px solid #55e5a9;background:#55e5a933;border-radius:50%;box-shadow:0 0 12px #55e5a9aa}
 .maplibregl-marker .place-marker{transition:transform .15s ease}.maplibregl-marker .place-marker:hover{transform:scale(1.18)}
+.scan-progress{color:#8edcff;font-size:11px;margin:12px 0 0;border:1px dashed #1d5070;border-radius:8px;padding:10px;background:#0a1f30}
