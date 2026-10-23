@@ -265,6 +265,7 @@ async fn main() {
         .route("/api/provider", get(provider_info))
         .route("/api/google/search", post(google_search))
         .route("/api/google/details", post(google_details))
+        .route("/api/google/photo", get(google_photo))
         .with_state(state)
         .layer(cors)
         .layer(TraceLayer::new_for_http());
@@ -486,6 +487,111 @@ async fn google_details(
     })?;
 
     Ok(Json(details))
+}
+
+/// Google Places Photo (New) proxy. Fetches photo media from Google and
+/// streams it to the browser without exposing the server API key.
+async fn google_photo(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<impl axum::response::IntoResponse, (StatusCode, Json<ApiError>)> {
+    let Some(key) = &state.google_api_key else {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "google_unavailable",
+            "Google Maps Platform is not configured.",
+            None,
+            None,
+        ));
+    };
+
+    let photo_name = params.get("name").cloned().unwrap_or_default();
+    let max_width = params
+        .get("maxWidthPx")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(400)
+        .min(4800);
+
+    if photo_name.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_photo_name",
+            "Photo name is required",
+            None,
+            None,
+        ));
+    }
+
+    // Validate photo name format (should be places/.../photos/...)
+    if !photo_name.starts_with("places/") {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_photo_name",
+            "Invalid photo name format",
+            None,
+            None,
+        ));
+    }
+
+    let client = state.http.clone();
+    let url = format!(
+        "https://places.googleapis.com/v1/{}?key={}&maxWidthPx={}",
+        photo_name, key, max_width
+    );
+
+    let response = client.get(&url).send().await.map_err(|e| {
+        if e.is_timeout() {
+            api_error(
+                StatusCode::GATEWAY_TIMEOUT,
+                "google_timeout",
+                "Google photo request timed out.",
+                None,
+                None,
+            )
+        } else {
+            api_error(
+                StatusCode::BAD_GATEWAY,
+                "google_upstream_error",
+                "Google photo upstream error.",
+                None,
+                None,
+            )
+        }
+    })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err(api_error(
+            status,
+            "google_api_error",
+            &format!("Google photo API returned {}", status),
+            None,
+            None,
+        ));
+    }
+
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_owned();
+
+    let bytes = response.bytes().await.map_err(|_| {
+        api_error(
+            StatusCode::BAD_GATEWAY,
+            "google_invalid_response",
+            "Failed to read photo data.",
+            None,
+            None,
+        )
+    })?;
+
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, content_type)],
+        bytes,
+    ))
 }
 
 async fn scan(

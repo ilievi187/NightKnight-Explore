@@ -4,6 +4,9 @@ interface GoogleMapProps {
   lat: number
   lon: number
   apiKey: string
+  places?: { id: string; displayName?: { text: string } }[]
+  selectedId?: string | null
+  onSelect?: (id: string) => void
   onMapClick?: (lat: number, lon: number) => void
 }
 
@@ -11,20 +14,25 @@ declare global {
   interface Window {
     google?: {
       maps: {
-        Map: new (element: HTMLElement, options: unknown) => unknown
-        Marker: new (options: unknown) => unknown
-        LatLng: new (lat: number, lng: number) => unknown
-        MapMouseEvent: unknown
+        Map: new (element: HTMLElement, options: unknown) => {
+          addListener: (event: string, handler: (e: { latLng?: { lat: () => number; lng: () => number } }) => void) => void
+          setCenter: (center: { lat: number; lng: number }) => void
+        }
+        Marker: new (options: unknown) => {
+          setMap: (map: unknown) => void
+          addListener: (event: string, handler: () => void) => void
+        }
       }
     }
   }
 }
 
-export default function GoogleMap({ lat, lon, apiKey, onMapClick }: GoogleMapProps) {
+export default function GoogleMap({ lat, lon, apiKey, places = [], selectedId, onSelect, onMapClick }: GoogleMapProps) {
   const container = useRef<HTMLDivElement>(null)
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState('')
   const mapRef = useRef<unknown>(null)
+  const markersRef = useRef<unknown[]>([])
 
   useEffect(() => {
     if (!apiKey) {
@@ -32,7 +40,6 @@ export default function GoogleMap({ lat, lon, apiKey, onMapClick }: GoogleMapPro
       return
     }
 
-    // Load Google Maps JS API
     const script = document.createElement('script')
     script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places`
     script.async = true
@@ -57,7 +64,7 @@ export default function GoogleMap({ lat, lon, apiKey, onMapClick }: GoogleMapPro
     mapRef.current = map
 
     if (onMapClick) {
-      (map as { addListener: (event: string, handler: unknown) => void }).addListener('click', (e: { latLng?: { lat: () => number; lng: () => number } }) => {
+      map.addListener('click', (e: { latLng?: { lat: () => number; lng: () => number } }) => {
         if (e.latLng) {
           onMapClick(e.latLng.lat(), e.latLng.lng())
         }
@@ -68,6 +75,31 @@ export default function GoogleMap({ lat, lon, apiKey, onMapClick }: GoogleMapPro
       mapRef.current = null
     }
   }, [loaded, lat, lon, onMapClick])
+
+  // Add markers for Google places
+  useEffect(() => {
+    if (!loaded || !mapRef.current || !window.google?.maps) return
+
+    const googleMaps = window.google.maps
+
+    // Clear existing markers
+    markersRef.current.forEach((m: unknown) => {
+      (m as { setMap: (map: unknown) => void }).setMap(null)
+    })
+    markersRef.current = []
+
+    places.forEach((place) => {
+      const marker = new googleMaps.Marker({
+        position: { lat, lng: lon }, // Note: Google search doesn't return individual coords in New API
+        map: mapRef.current,
+        title: place.displayName?.text || 'Unknown',
+      })
+      if (onSelect) {
+        marker.addListener('click', () => onSelect(place.id))
+      }
+      markersRef.current.push(marker)
+    })
+  }, [loaded, places, lat, lon, onSelect])
 
   if (error) {
     return <div className="map-error" role="alert">{error}</div>
