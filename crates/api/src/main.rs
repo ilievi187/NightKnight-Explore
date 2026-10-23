@@ -266,9 +266,8 @@ fn to_place(el: OverpassElement, center_lat: f64, center_lon: f64, radius: u32) 
     })
 }
 fn category(tags: &HashMap<String, String>) -> &'static str {
-    match tags.get("amenity").map(String::as_str) {
-        Some("restaurant" | "cafe" | "bar" | "pub") => return "food",
-        _ => {}
+    if let Some("restaurant" | "cafe" | "bar" | "pub") = tags.get("amenity").map(String::as_str) {
+        return "food";
     }
     match tags.get("tourism").map(String::as_str) {
         Some("hotel" | "guest_house" | "hostel") => "stay",
