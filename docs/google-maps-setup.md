@@ -7,7 +7,7 @@ NightKnight Explore supports Google Maps Platform for enhanced place discovery, 
 ## Prerequisites
 
 1. **Google Cloud Project** — Create a project at [console.cloud.google.com](https://console.cloud.google.com)
-2. **Billing** — Google Maps Platform requires a billing account. The $200/month free tier credit covers most small-scale usage.
+2. **Billing** — Google Maps Platform requires a billing account. As of March 2025, the flat $200/month credit was replaced by SKU-specific free usage caps. Check current pricing at https://developers.google.com/maps/billing-and-pricing/pricing
 3. **API Keys** — Create separate keys for browser (Maps JS API) and server (Places API)
 
 ## Required APIs
@@ -53,14 +53,35 @@ GOOGLE_CLOUD_PROJECT=your-project-id
 ## Cost Control
 
 ### Free Tier
-Google Maps Platform provides $200/month in free usage. Typical costs:
+As of March 2025, Google Maps Platform replaced the flat $200/month credit with SKU-specific free usage caps.
 
-| Service | Free Tier | Cost Beyond |
-|---------|-----------|-------------|
-| Maps JavaScript API | 28,000 loads/month | $7/1000 loads |
-| Places API (Nearby Search) | 5,000 requests/month | $32/1000 requests |
-| Places API (Details) | 5,000 requests/month | $17/1000 requests |
-| Places API (Photos) | 5,000 requests/month | $7/1000 requests |
+Typical free usage and costs:
+
+| Service | Free Tier (monthly) | Cost Beyond |
+|---------|---------------------|-------------|
+| Maps JavaScript API | 28,000 loads | $7/1000 loads |
+| Places API (Nearby Search) | 5,000 requests | $32/1000 requests |
+| Places API (Details) | 5,000 requests | $17/1000 requests |
+| Places API (Photos) | 5,000 requests | $7/1000 requests |
+
+**Note**: These are approximate values. Check [Google Maps Platform Pricing](https://developers.google.com/maps/billing-and-pricing/pricing) for current exact rates.
+
+### Field Mask Audit (Cost Impact)
+
+NightKnight Explore uses the following field masks to minimize costs:
+
+**Nearby Search** (`/api/google/search`):
+- `places.id,places.displayName,places.types,places.rating,places.userRatingCount,places.formattedAddress,places.websiteUri,places.internationalPhoneNumber,places.priceLevel,places.photos`
+- Triggers: Nearby Search (Basic) + optional Advanced/Enterprise SKUs based on fields requested
+
+**Place Details** (`/api/google/details`):
+- `id,displayName,rating,userRatingCount,formattedAddress,websiteUri,internationalPhoneNumber,priceLevel,regularOpeningHours,photos,reviews`
+- Triggers: Place Details (Basic) + Atmosphere/Contact SKUs for reviews/hours/phone
+
+**Cost Reduction**:
+- Photos are only fetched when user opens details (not in search results)
+- Reviews are only fetched in details (max 5 per Places API policy)
+- Field masks exclude expensive fields like `editorialSummary`, `currentOpeningHours` unless needed
 
 ### Best Practices
 1. **Field selection**: Request only needed fields to reduce cost
@@ -69,6 +90,7 @@ Google Maps Platform provides $200/month in free usage. Typical costs:
 4. **Caching**: Cache place details in memory (not persistent storage)
 5. **Debouncing**: Avoid repeated requests on map movement
 6. **Quota limits**: Set daily quotas in Google Cloud Console
+7. **Billing alerts**: Set alerts but note they do NOT guarantee a hard spending cap
 
 ### Billing Alerts
 - Set billing alerts in Google Cloud Console
