@@ -28,7 +28,7 @@ HTTP status mapping in this MVP: invalid scan input is 400; local Overpass coold
 
 | Provider/data | Status | Cache/retention behavior |
 |---|---|---|
-| OpenStreetMap POIs via configured Overpass | Enabled for explicit user-triggered scans | API response cache is memory-only for 15 minutes, keyed by rounded scan coordinates and radius. Expired entries are pruned during the next scan request. The shared endpoint has an 8-second request cooldown. No server-side persistence or user scan history. ODbL attribution remains on each place. |
+| OpenStreetMap POIs via configured Overpass | Enabled for explicit user-triggered scans | API response cache is memory-only for 15 minutes, keyed by the exact scan origin and radius so cached distance measurements are never reused for a different point. Expired entries are pruned during the next scan request. The shared endpoint has an 8-second request cooldown. No server-side persistence or user scan history. ODbL attribution remains on each place. |
 | OpenStreetMap raster tiles | Displayed by MapLibre | Tiles are requested from `tile.openstreetmap.org`; the app does not add its own tile cache. Browser/network caching and display must follow the OSM Tile Usage Policy. |
 | Google Places | Not configured / unavailable | No requests, caching, storage, or display until the owner approves a provider-specific license, account, attribution, caching, retention, display, privacy, and cost review. No scraping. |
 | Reddit | Not configured / unavailable | No requests, caching, storage, or display until official API authorization and current terms permit the intended use and retention. No HTML scraping or access-control bypass. See the [eligibility assessment](reddit-api-assessment.md). |

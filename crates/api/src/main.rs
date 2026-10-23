@@ -152,7 +152,7 @@ async fn scan(
             "Invalid coordinates or radius (500–10000m)",
         ));
     }
-    let key = format!("{:.4}:{:.4}:{radius}", q.lat, q.lon);
+    let key = scan_cache_key(q.lat, q.lon, radius);
     let mut cache = state.cache.lock().await;
     cache.retain(|_, hit| hit.created.elapsed() < OVERPASS_CACHE_TTL);
     if let Some(hit) = cache.get(&key) {
@@ -233,6 +233,16 @@ async fn scan(
         },
     );
     Ok(Json(response))
+}
+
+fn scan_cache_key(lat: f64, lon: f64, radius_m: u32) -> String {
+    let normalized_lat = if lat == 0.0 { 0.0 } else { lat };
+    let normalized_lon = if lon == 0.0 { 0.0 } else { lon };
+    format!(
+        "{:016x}:{:016x}:{radius_m}",
+        normalized_lat.to_bits(),
+        normalized_lon.to_bits()
+    )
 }
 
 fn error(status: StatusCode, msg: &str) -> (StatusCode, Json<ApiError>) {
@@ -429,5 +439,25 @@ mod tests {
         assert_eq!(payload.code, "provider_rate_limited");
         assert_eq!(payload.provider_id, Some("openstreetmap-overpass"));
         assert_eq!(payload.retry_after_seconds, Some(8));
+    }
+
+    #[test]
+    fn scan_cache_key_distinguishes_nearby_origins() {
+        assert_ne!(
+            scan_cache_key(43.21401, 27.915, 2500),
+            scan_cache_key(43.21402, 27.915, 2500)
+        );
+    }
+
+    #[test]
+    fn scan_cache_key_reuses_identical_origin_and_radius() {
+        assert_eq!(
+            scan_cache_key(43.21401, 27.915, 2500),
+            scan_cache_key(43.21401, 27.915, 2500)
+        );
+        assert_ne!(
+            scan_cache_key(43.21401, 27.915, 2500),
+            scan_cache_key(43.21401, 27.915, 3000)
+        );
     }
 }
