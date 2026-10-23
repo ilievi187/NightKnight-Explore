@@ -11,6 +11,7 @@ Each returned place carries:
 - `source_url`: canonical provider record URL, not a search result or an inferred URL.
 - `attribution`: `{ provider_id, label, text, url, license }` metadata that applies to this record.
 - `name`, category, coordinates, and distance: values supplied or calculated from the provider record; absent facts remain absent.
+- `gem` (optional): `{ score, method, reasons[] }` — the transparent Hidden Gems signal defined in [`hidden-gems-method.md`](hidden-gems-method.md). Present only when the record's own tags support at least one documented signal; `null` otherwise.
 
 Clients must show the returned source attribution and keep its link adjacent to the place. Do not use provider names, logos, or attribution text to imply endorsement.
 

@@ -1,8 +1,10 @@
 # NightKnight Explore 🧭
 
-**FOSS, local-first discovery of restaurants, hotels, attractions, museums, cafes and hidden gems.**
+**FOSS, local-first discovery of restaurants, hotels, attractions, museums, cafes, historical landmarks and hidden gems.**
 
-Status: **early MVP scaffold**, not a finished travel/reviews service. The initial scan uses OpenStreetMap data through an Overpass endpoint, on explicit user request. **No Google Maps or Reddit reviews are fetched in this version.** Ratings, review synthesis, booking, and cross-site sentiment analysis are roadmap features that require lawful provider access and verifiable citations.
+Status: **early MVP scaffold**, not a finished travel/reviews service. The initial scan uses OpenStreetMap data through a failover chain of Overpass endpoints, on explicit user request. **No Google Maps or Reddit reviews are fetched in this version.** Ratings, review synthesis, booking, and cross-site sentiment analysis are roadmap features that require lawful provider access and verifiable citations.
+
+Each result can carry a transparent **Hidden Gems signal**: a deterministic score plus per-point explanations derived only from that record's own OSM tags (historical structures, viewpoints, waterfalls, dereliction, documentation links…). The method is documented in [`docs/hidden-gems-method.md`](docs/hidden-gems-method.md); no popularity or rating is invented anywhere.
 
 ## Tech stack
 
@@ -28,7 +30,7 @@ On Linux/macOS: `cd crates/api && cargo run` and, separately, `cd apps/web && np
 
 ## How to scan
 
-Set coordinates manually (Sofia is only a sample starting point) or explicitly allow browser location. Choose a radius from 500 m to 10 km and optional category filters. Click **Scan area**. The server fetches POIs near the chosen coordinates, deduplicates, and sorts by actual geographic distance. The UI does not invent popularity, reviews, open-hours or ratings. Click the OSM link to inspect the original place record.
+Set coordinates manually (Sofia is only a sample starting point) or explicitly allow browser location. Choose a radius from 500 m to 10 km and filter across 5 categories (attractions, historical landmarks, nature, food, stays). Click **Scan area**. The server fetches POIs near the chosen coordinates, deduplicates, sorts them (by distance or by transparent gem signal), and shows each place's source and gem reasoning. The UI does not invent popularity, reviews, open-hours or ratings. Click the OSM link to inspect the original place record.
 
 Use **Save place** on a result to keep its OpenStreetMap record ID and canonical source URL in this browser's local storage. Saved links remain on this device and can be removed individually or cleared together. NightKnight Explore does not store scan history, names, coordinates, or search terms in favorites; clearing browser site data also removes saved links.
 
@@ -38,7 +40,7 @@ The public Overpass endpoints are shared resources: this MVP enforces an 8-secon
 
 `GET /api/health` — server status
 
-`GET /api/scan?lat=43.214&lon=27.915&radius_m=2500` — manual POI scan, results with canonical record URLs, actual distance, and per-place attribution; provider failures include machine-readable codes and retry hints when known. Requests may return 429 on cooldown or 502 if the public data provider is unavailable. No authentication is implemented; **do not bind this prototype to a public network interface**.
+`GET /api/scan?lat=43.214&lon=27.915&radius_m=2500` — manual POI scan, results with canonical record URLs, actual distance, per-place attribution, and an optional explained `gem` signal; provider failures include machine-readable codes and retry hints when known. Requests may return 429 on cooldown or 502/`provider_timeout` if the data providers are unavailable or stalled. No authentication is implemented; **do not bind this prototype to a public network interface**.
 
 Options: `OVERPASS_ENDPOINT` (optional) pins a single trusted Overpass service; by default the API fails over across a small list of public Overpass instances and marks unhealthy ones offline for 30 seconds (see [`docs/provider-integration.md`](docs/provider-integration.md)). Real upstream queries take 5–40 seconds under load; the API reports honest `provider_timeout`/`provider_unavailable` errors rather than stalling forever. `BIND_ADDRESS` defaults to `127.0.0.1:8787`.
 

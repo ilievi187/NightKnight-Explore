@@ -3,19 +3,24 @@ import { LngLatBounds, Map as MapLibreMap, Marker, NavigationControl } from 'map
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { addFavorite, clearFavorites, readFavorites, removeFavorite, type FavoritePlace } from './favorites'
 
-type Category = 'all' | 'food' | 'stay' | 'see'
+type Category = 'all' | 'food' | 'stay' | 'see' | 'history' | 'nature'
+type GemReason = { text: string; field_path: string; observed_value: string }
+type GemSignal = { score: number; method: string; reasons: GemReason[] }
 type SourceAttribution = { provider_id: string; label: string; text: string; url: string; license: string }
-type Place = { id: string; name: string; category: Exclude<Category,'all'>; lat: number; lon: number; distance_m: number; source: string; source_url: string; attribution: SourceAttribution; website: string | null }
+type Place = { id: string; name: string; category: Exclude<Category,'all'>; lat: number; lon: number; distance_m: number; source: string; source_url: string; attribution: SourceAttribution; website: string | null; gem: GemSignal | null }
 type ScanResponse = { places: Place[]; scanned_at_unix: number; source: string; cached: boolean }
 const categories: { key: Category; label: string; icon: string }[] = [
-  {key:'all',label:'Everything',icon:'✦'}, {key:'food',label:'Food & coffee',icon:'◈'},
-  {key:'stay',label:'Hotels & stays',icon:'▣'}, {key:'see',label:'Attractions',icon:'⌁'}
+  {key:'all',label:'Everything',icon:'✦'}, {key:'see',label:'Attractions',icon:'⌁'},
+  {key:'history',label:'Historical',icon:'⌂'}, {key:'nature',label:'Nature',icon:'❧'},
+  {key:'food',label:'Food & coffee',icon:'◈'}, {key:'stay',label:'Hotels & stays',icon:'▣'}
 ]
 const prettyDistance = (m: number) => m < 1000 ? `${m} m` : `${(m / 1000).toFixed(1)} km`
 const validLat = (v:number) => Number.isFinite(v) && v>=-90 && v<=90
 const validLon = (v:number) => Number.isFinite(v) && v>=-180 && v<=180
-const categoryLabel = (c: Place['category']) => ({food:'Food & coffee',stay:'Place to stay',see:'Attraction'})[c]
-const symbol = (c: Place['category']) => ({food:'◈',stay:'▣',see:'⌁'})[c]
+const categoryLabel = (c: Place['category']) => ({food:'Food & coffee',stay:'Place to stay',see:'Attraction',history:'Historical landmark',nature:'Nature spot'})[c]
+const symbol = (c: Place['category']) => ({food:'◈',stay:'▣',see:'⌁',history:'⌂',nature:'❧'})[c]
+const gemBadge = (score: number) => score >= 75 ? 'Rare find' : score >= 50 ? 'Hidden gem' : 'Notable'
+const gemClass = (score: number) => score >= 75 ? 'gem-high' : score >= 50 ? 'gem-mid' : 'gem-low'
 
 function ExploreMap({places, lat, lon, selected, onSelect}:{places: Place[],lat:number,lon:number,selected:string|null,onSelect:(id:string)=>void}) {
   const container=useRef<HTMLDivElement>(null)
@@ -60,13 +65,17 @@ export default function App(){
   const [radius,setRadius]=useState(2500)
   const [category,setCategory]=useState<Category>('all')
   const [search,setSearch]=useState('')
+  const [sortBy,setSortBy]=useState<'distance'|'gems'>('distance')
   const [data,setData]=useState<ScanResponse|null>(null)
   const [error,setError]=useState('')
   const [busy,setBusy]=useState(false)
   const [locating,setLocating]=useState(false)
   const [selected,setSelected]=useState<string|null>(null)
   const controller=useRef<AbortController|null>(null)
-  const places=useMemo(()=>(data?.places||[]).filter(p=>(category==='all'||p.category===category)&&p.name.toLocaleLowerCase().includes(search.toLocaleLowerCase())),[data,category,search])
+  const places=useMemo(()=>(data?.places||[]).filter(p=>(category==='all'||p.category===category)&&p.name.toLocaleLowerCase().includes(search.toLocaleLowerCase()))
+    .sort((a,b)=>sortBy==='gems'
+      ?(b.gem?.score??0)-(a.gem?.score??0)||a.distance_m-b.distance_m
+      :a.distance_m-b.distance_m),[data,category,search,sortBy])
   const selectedPlace=places.find(p=>p.id===selected)
   const toggleFavorite=(place:Place)=>{
     try{
@@ -123,7 +132,7 @@ export default function App(){
     <main className="main">
       <header className="topbar"><nav className="view-switch" aria-label="Explore views"><button className={screen==='discover'?'view-active':''} aria-current={screen==='discover'?'page':undefined} onClick={()=>setScreen('discover')}>Discover</button><button className={screen==='saved'?'view-active':''} aria-current={screen==='saved'?'page':undefined} onClick={()=>setScreen('saved')}>Saved places ({favorites.length})</button></nav><div className="status-pill"><span className="live-dot"/> ALPHA 0.1 · FOSS</div></header>
       {screen==='discover'&&<>
-      <section className="hero"><div className="hero-bg"/><div className="eyebrow">✦ &nbsp; YOUR WORLD, REVEALED</div><h1>Discover what’s <em>around you.</em></h1><p>One scan. Local restaurants, places to stay, and places worth seeing — real OpenStreetMap records, no invented ratings.</p><div className="hero-metrics"><span><strong>3</strong> DISCOVERY CATEGORIES</span><span><strong>10 KM</strong> MAX RADIUS</span><span><strong>OPEN</strong> SOURCE DATA</span></div></section>
+      <section className="hero"><div className="hero-bg"/><div className="eyebrow">✦ &nbsp; YOUR WORLD, REVEALED</div><h1>Discover what’s <em>around you.</em></h1><p>One scan. Real restaurants, places to stay, historical landmarks and hidden natural corners — real OpenStreetMap records with transparent, explained gem signals. No invented ratings.</p><div className="hero-metrics"><span><strong>5</strong> DISCOVERY CATEGORIES</span><span><strong>10 KM</strong> MAX RADIUS</span><span><strong>OPEN</strong> SOURCE DATA</span></div></section>
       <section className="workbench">
         <div className="panel controls"><div className="section-heading"><span className="blue-bar"/><div><div className="overline">SCAN PARAMETERS</div><h2>Set your coordinates</h2></div></div>
           <div className="form-grid"><label>LATITUDE<input type="number" value={lat} onChange={e=>setLat(e.target.value)} step="any" min="-90" max="90"/></label><label>LONGITUDE<input type="number" value={lon} onChange={e=>setLon(e.target.value)} step="any" min="-180" max="180"/></label></div>
@@ -136,14 +145,18 @@ export default function App(){
         <div className="panel map-panel"><div className="map-heading"><div><span className="overline">GEOSPATIAL VIEW</span><h2>Area overview</h2></div><span className="map-chip">◉ LIVE MAP</span></div><ExploreMap places={places} lat={Number(lat)} lon={Number(lon)} selected={selected} onSelect={setSelected}/>
         </div>
       </section>
-      <section className="results"><div className="results-header"><div><div className="overline">DISCOVERY RESULTS</div><h2>{data?`${places.length} places found`:'Your next discovery starts here'}</h2><p>{data?`Source: ${data.source} • ${data.cached?'cached scan':'fresh scan'} • distance-sorted results`:'Choose a location and start a scan to find real nearby places.'}</p></div><input className="search" aria-label="Search scanned places" placeholder="⌕ Search results" value={search} onChange={e=>setSearch(e.target.value)}/></div>
+      <section className="results"><div className="results-header"><div><div className="overline">DISCOVERY RESULTS</div><h2>{data?`${places.length} places found`:'Your next discovery starts here'}</h2><p>{data?`Source: ${data.source} • ${data.cached?'cached scan':'fresh scan'} • ${sortBy==='gems'?'gem signals first':'distance-sorted'} results`:'Choose a location and start a scan to find real nearby places.'}</p></div><div className="results-tools"><button className="ghost sort-toggle" onClick={()=>setSortBy(sortBy==='gems'?'distance':'gems')} disabled={!data||data.places.every(p=>!p.gem)}>{sortBy==='gems'?'Ⓓ Distance first':'✦ Hidden gems first'}</button><input className="search" aria-label="Search scanned places" placeholder="⌕ Search results" value={search} onChange={e=>setSearch(e.target.value)}/></div></div>
       <div className="tabs">{categories.map(c=><button key={c.key} className={c.key===category?'active':''} onClick={()=>{setCategory(c.key);setSelected(null)}}>{c.icon} &nbsp; {c.label}</button>)}</div>
       {selectedPlace&&<div className="selected-note">Selected: <strong>{selectedPlace.name}</strong> — {prettyDistance(selectedPlace.distance_m)} away</div>}
       <div className="places">
         {!data?<div className="empty"><span>✦</span><strong>Ready when you are</strong><p>Scan a region to populate nearby places with source links.</p></div>:
           places.length===0?<div className="empty"><span>⌁</span><strong>No matching places</strong><p>Try another category, query or radius.</p></div>:
           places.map(p=><article className={`place-card ${p.id===selected?'selected':''}`} key={p.id} onClick={()=>setSelected(p.id)}>
-            <div className={`place-symbol ${p.category}`}>{symbol(p.category)}</div><div className="place-body"><div className="place-type">{categoryLabel(p.category)}</div><h3>{p.name}</h3><p>◎ &nbsp; {prettyDistance(p.distance_m)} away</p><div className="place-links"><a href={p.source_url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Open record ↗</a><a href={p.attribution.url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>{p.attribution.text} ↗</a>{p.website&&<a href={p.website} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Website ↗</a>}<button className="favorite-toggle" aria-pressed={favorites.some(favorite=>favorite.id===p.id)} onClick={e=>{e.stopPropagation();toggleFavorite(p)}}>{favorites.some(favorite=>favorite.id===p.id)?'★ Saved':'☆ Save place'}</button></div></div>
+            <div className={`place-symbol ${p.category}`}>{symbol(p.category)}</div><div className="place-body">
+            <div className="place-type">{categoryLabel(p.category)}</div><h3>{p.name}</h3><p>◎ &nbsp; {prettyDistance(p.distance_m)} away</p>
+            {p.gem&&<div className={`gem-badge ${gemClass(p.gem.score)}`} title="Transparent OSM tag signals — no ratings or reviews">✦ {gemBadge(p.gem.score)} · {p.gem.score}/100</div>}
+            {p.gem&&p.gem.reasons.length>0&&<details className="gem-why"><summary>Why this signal?</summary><ul>{p.gem.reasons.map((reason,i)=><li key={i}><span className="gem-reason-text">{reason.text}</span>{reason.observed_value&&<code className="gem-tag">{reason.field_path} = {reason.observed_value}</code>}{!reason.observed_value&&<code className="gem-tag">{reason.field_path}</code>}</li>)}</ul><p className="gem-note">Derived only from this record's OpenStreetMap tags ({p.gem.method}). No popularity, ratings or reviews are involved.</p></details>}
+            <div className="place-links"><a href={p.source_url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Open record ↗</a><a href={p.attribution.url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>{p.attribution.text} ↗</a>{p.website&&<a href={p.website} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Website ↗</a>}<button className="favorite-toggle" aria-pressed={favorites.some(favorite=>favorite.id===p.id)} onClick={e=>{e.stopPropagation();toggleFavorite(p)}}>{favorites.some(favorite=>favorite.id===p.id)?'★ Saved':'☆ Save place'}</button></div></div>
           </article>)}
       </div></section>
       </>}
