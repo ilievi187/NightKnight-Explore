@@ -1,0 +1,23 @@
+# Rust
+/target/
+**/target/
+# Node
+node_modules/
+dist/
+.vite/
+# local config and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# tools
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+# logs
+*.log
+# Windows & test
+*.pdb
+coverage/
