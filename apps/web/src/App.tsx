@@ -83,7 +83,7 @@ export default function App(){
     try{
       const next=favorites.some(favorite=>favorite.id===place.id)
         ? removeFavorite(place.id)
-        : addFavorite({id:place.id,source_url:place.source_url})
+        : addFavorite({id:place.id,source_url:place.source_url,name:place.name,category:place.category})
       setFavorites(next);setError('')
     }catch{setError('Could not update local favorites. Check your browser storage settings.')}
   }
@@ -170,7 +170,7 @@ export default function App(){
           </article>)}
       </div></section>
       </>}
-      {screen==='saved'&&<section className="results saved-results"><div className="results-header"><div><div className="overline">ON THIS DEVICE ONLY</div><h2>Saved place links</h2><p>Only selected OpenStreetMap IDs and source URLs are stored in this browser. Scans and coordinates are not saved.</p></div>{favorites.length>0&&<button className="ghost clear-favorites" onClick={deleteAllFavorites}>Clear all saved places</button>}</div>{error&&<p role="alert" className="error">⚠ {error}</p>}<div className="places">{favorites.length===0?<div className="empty"><span>☆</span><strong>No saved places</strong><p>Save a place from discovery results to keep its OpenStreetMap link here.</p></div>:favorites.map(favorite=><article className="place-card saved-card" key={favorite.id}><div className="place-symbol">☆</div><div className="place-body"><div className="place-type">OpenStreetMap record</div><h3>{favorite.id}</h3><div className="place-links"><a href={favorite.source_url} target="_blank" rel="noopener noreferrer">Open record ↗</a><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors ↗</a><button className="favorite-toggle" onClick={()=>deleteFavorite(favorite.id)}>Remove</button></div></div></article>)}</div></section>}
+      {screen==='saved'&&<section className="results saved-results"><div className="results-header"><div><div className="overline">ON THIS DEVICE ONLY</div><h2>Saved place links</h2><p>Only selected OpenStreetMap IDs and source URLs are stored in this browser. Scans and coordinates are not saved.</p></div>{favorites.length>0&&<button className="ghost clear-favorites" onClick={deleteAllFavorites}>Clear all saved places</button>}</div>{error&&<p role="alert" className="error">⚠ {error}</p>}<div className="places">{favorites.length===0?<div className="empty"><span>☆</span><strong>No saved places</strong><p>Save a place from discovery results to keep its OpenStreetMap link here.</p></div>:favorites.map(favorite=><article className="place-card saved-card" key={favorite.id}><div className={`place-symbol ${favorite.category||''}`}>{favorite.category?symbol(favorite.category):'☆'}</div><div className="place-body"><div className="place-type">{favorite.category?categoryLabel(favorite.category):'OpenStreetMap record'}</div><h3 title={favorite.id}>{favorite.name||favorite.id}</h3><div className="place-links"><a href={favorite.source_url} target="_blank" rel="noopener noreferrer">Open record ↗</a><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors ↗</a><button className="favorite-toggle" onClick={()=>deleteFavorite(favorite.id)}>Remove</button></div></div></article>)}</div></section>}
       <footer>NightKnight Explore · Open-source alpha · Places © OpenStreetMap contributors (ODbL) · No reviews or ratings included in this build.</footer>
     </main>
   </div>
