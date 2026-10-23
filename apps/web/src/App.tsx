@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { LngLatBounds, Map as MapLibreMap, Marker, NavigationControl } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
+import { addFavorite, clearFavorites, readFavorites, removeFavorite, type FavoritePlace } from './favorites'
 
 type Category = 'all' | 'food' | 'stay' | 'see'
 type Place = { id: string; name: string; category: Exclude<Category,'all'>; lat: number; lon: number; distance_m: number; source: string; source_url: string; website: string | null }
@@ -51,6 +52,8 @@ function ExploreMap({places, lat, lon, selected, onSelect}:{places: Place[],lat:
 }
 
 export default function App(){
+  const [screen,setScreen]=useState<'discover'|'saved'>('discover')
+  const [favorites,setFavorites]=useState<FavoritePlace[]>(()=>readFavorites())
   const [lat,setLat]=useState('42.6977')
   const [lon,setLon]=useState('23.3219')
   const [radius,setRadius]=useState(2500)
@@ -64,6 +67,21 @@ export default function App(){
   const controller=useRef<AbortController|null>(null)
   const places=useMemo(()=>(data?.places||[]).filter(p=>(category==='all'||p.category===category)&&p.name.toLocaleLowerCase().includes(search.toLocaleLowerCase())),[data,category,search])
   const selectedPlace=places.find(p=>p.id===selected)
+  const toggleFavorite=(place:Place)=>{
+    try{
+      const next=favorites.some(favorite=>favorite.id===place.id)
+        ? removeFavorite(place.id)
+        : addFavorite({id:place.id,source_url:place.source_url})
+      setFavorites(next);setError('')
+    }catch{setError('Could not update local favorites. Check your browser storage settings.')}
+  }
+  const deleteFavorite=(id:string)=>{
+    try{setFavorites(removeFavorite(id))}catch{setError('Could not remove this local favorite.')}
+  }
+  const deleteAllFavorites=()=>{
+    if(!window.confirm('Remove all saved place links from this browser?'))return
+    try{clearFavorites();setFavorites([])}catch{setError('Could not clear local favorites.')}
+  }
   const scan=async()=>{
     const a=Number(lat), b=Number(lon)
     if(!validLat(a)||!validLon(b)||!lat.trim()||!lon.trim()){setError('Enter valid latitude (−90 to 90) and longitude (−180 to 180).');return}
@@ -92,13 +110,14 @@ export default function App(){
       <div className="brand"><div className="brand-mark">N<span>✦</span></div><div><strong>NightKnight</strong><small>EXPLORE / 01</small></div></div>
       <div className="side-caption">DISCOVERY SYSTEM</div>
       <div className="side-active">◉ &nbsp; Area scanner <span>01</span></div>
-      <div className="side-muted">◎ &nbsp; Saved places <span>SOON</span></div>
+      <div className="side-muted">◎ &nbsp; Saved places <span>LOCAL</span></div>
       <div className="side-muted">◈ &nbsp; Review insights <span>SOON</span></div>
       <div className="side-muted">⌁ &nbsp; Trip planner <span>SOON</span></div>
       <div className="sidebar-foot"><span className="live-dot"/> LOCAL-FIRST DISCOVERY<br/><small>Open data • Transparent sources</small></div>
     </aside>
     <main className="main">
-      <header className="topbar"><div className="breadcrumb">NAVIGATION <span>/</span> AREA SCANNER</div><div className="status-pill"><span className="live-dot"/> ALPHA 0.1 · FOSS</div></header>
+      <header className="topbar"><nav className="view-switch" aria-label="Explore views"><button className={screen==='discover'?'view-active':''} aria-current={screen==='discover'?'page':undefined} onClick={()=>setScreen('discover')}>Discover</button><button className={screen==='saved'?'view-active':''} aria-current={screen==='saved'?'page':undefined} onClick={()=>setScreen('saved')}>Saved places ({favorites.length})</button></nav><div className="status-pill"><span className="live-dot"/> ALPHA 0.1 · FOSS</div></header>
+      {screen==='discover'&&<>
       <section className="hero"><div className="hero-bg"/><div className="eyebrow">✦ &nbsp; YOUR WORLD, REVEALED</div><h1>Discover what’s <em>around you.</em></h1><p>One scan. Local restaurants, places to stay, and places worth seeing — real OpenStreetMap records, no invented ratings.</p><div className="hero-metrics"><span><strong>3</strong> DISCOVERY CATEGORIES</span><span><strong>10 KM</strong> MAX RADIUS</span><span><strong>OPEN</strong> SOURCE DATA</span></div></section>
       <section className="workbench">
         <div className="panel controls"><div className="section-heading"><span className="blue-bar"/><div><div className="overline">SCAN PARAMETERS</div><h2>Set your coordinates</h2></div></div>
@@ -119,9 +138,11 @@ export default function App(){
         {!data?<div className="empty"><span>✦</span><strong>Ready when you are</strong><p>Scan a region to populate nearby places with source links.</p></div>:
           places.length===0?<div className="empty"><span>⌁</span><strong>No matching places</strong><p>Try another category, query or radius.</p></div>:
           places.map(p=><article className={`place-card ${p.id===selected?'selected':''}`} key={p.id} onClick={()=>setSelected(p.id)}>
-            <div className={`place-symbol ${p.category}`}>{symbol(p.category)}</div><div className="place-body"><div className="place-type">{categoryLabel(p.category)}</div><h3>{p.name}</h3><p>◎ &nbsp; {prettyDistance(p.distance_m)} away</p><div className="place-links"><a href={p.source_url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>OpenStreetMap ↗</a>{p.website&&<a href={p.website} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Website ↗</a>}</div></div>
+            <div className={`place-symbol ${p.category}`}>{symbol(p.category)}</div><div className="place-body"><div className="place-type">{categoryLabel(p.category)}</div><h3>{p.name}</h3><p>◎ &nbsp; {prettyDistance(p.distance_m)} away</p><div className="place-links"><a href={p.source_url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>OpenStreetMap ↗</a>{p.website&&<a href={p.website} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>Website ↗</a>}<button className="favorite-toggle" aria-pressed={favorites.some(favorite=>favorite.id===p.id)} onClick={e=>{e.stopPropagation();toggleFavorite(p)}}>{favorites.some(favorite=>favorite.id===p.id)?'★ Saved':'☆ Save place'}</button></div></div>
           </article>)}
       </div></section>
+      </>}
+      {screen==='saved'&&<section className="results saved-results"><div className="results-header"><div><div className="overline">ON THIS DEVICE ONLY</div><h2>Saved place links</h2><p>Only selected OpenStreetMap IDs and source URLs are stored in this browser. Scans and coordinates are not saved.</p></div>{favorites.length>0&&<button className="ghost clear-favorites" onClick={deleteAllFavorites}>Clear all saved places</button>}</div>{error&&<p role="alert" className="error">⚠ {error}</p>}<div className="places">{favorites.length===0?<div className="empty"><span>☆</span><strong>No saved places</strong><p>Save a place from discovery results to keep its OpenStreetMap link here.</p></div>:favorites.map(favorite=><article className="place-card saved-card" key={favorite.id}><div className="place-symbol">☆</div><div className="place-body"><div className="place-type">OpenStreetMap record</div><h3>{favorite.id}</h3><div className="place-links"><a href={favorite.source_url} target="_blank" rel="noopener noreferrer">OpenStreetMap ↗</a><button className="favorite-toggle" onClick={()=>deleteFavorite(favorite.id)}>Remove</button></div></div></article>)}</div></section>}
       <footer>NightKnight Explore · Open-source alpha · Places © OpenStreetMap contributors (ODbL) · No reviews or ratings included in this build.</footer>
     </main>
   </div>
