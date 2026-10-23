@@ -5,7 +5,7 @@ use axum::{
     Json, Router,
 };
 
-use nightknight_explore_api::osm_db::{LocalPlace, OsmDatabase};
+use nightknight_explore_api::osm_db::OsmDatabase;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -80,6 +80,7 @@ struct ScanQuery {
     lat: f64,
     lon: f64,
     radius_m: Option<u32>,
+    offset: Option<usize>,
 }
 #[derive(Deserialize)]
 struct GeocodeQuery {
@@ -142,6 +143,7 @@ struct ScanResponse {
     scanned_at_unix: u64,
     source: &'static str,
     cached: bool,
+    total_matches: usize,
 }
 #[derive(Serialize, Clone)]
 struct GeocodePlace {
@@ -606,6 +608,7 @@ async fn scan(
     Query(q): Query<ScanQuery>,
 ) -> Result<Json<ScanResponse>, (StatusCode, Json<ApiError>)> {
     let radius = q.radius_m.unwrap_or(2000);
+    let offset = q.offset.unwrap_or(0);
     if !q.lat.is_finite()
         || !q.lon.is_finite()
         || !(-90.0..=90.0).contains(&q.lat)
@@ -628,20 +631,22 @@ async fn scan(
     drop(cache);
     // If local OSM database is available, use it instead of Overpass.
     if let Some(db) = &state.osm_db {
-        let places = db.search_nearby(q.lat, q.lon, radius, 120).map_err(|e| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Local OSM DB error: {}", e),
-            )
-        })?;
+        let (places, total) = db
+            .search_nearby(q.lat, q.lon, radius, 120, offset)
+            .map_err(|e| {
+                error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Local OSM DB error: {}", e),
+                )
+            })?;
         let places: Vec<Place> = places
             .into_iter()
-            .filter_map(|lp| {
+            .map(|lp| {
                 // Convert LocalPlace to Place
                 let category = lp.category.clone();
                 let name = lp.name.clone().unwrap_or_else(|| format!("OSM {}", lp.id));
                 let distance = haversine(q.lat, q.lon, lp.lat, lp.lon) as u32;
-                Some(Place {
+                Place {
                     id: format!("{}-{}", lp.osm_type, lp.id),
                     name,
                     category: category.clone(),
@@ -658,8 +663,12 @@ async fn scan(
                         license: "ODbL",
                     },
                     website: lp.website.clone(),
-                    gem: None,
-                })
+                    gem: {
+                        let tags: HashMap<String, String> =
+                            serde_json::from_str(&lp.tags).unwrap_or_default();
+                        assess_gem(&tags)
+                    },
+                }
             })
             .collect();
         let mut places = places;
@@ -670,6 +679,7 @@ async fn scan(
             scanned_at_unix: now_unix(),
             source: "OpenStreetMap (local DB)",
             cached: false,
+            total_matches: total,
         };
         state.cache.lock().await.insert(
             key,
@@ -704,11 +714,13 @@ async fn scan(
                 .collect();
             places.sort_by_key(|p| p.distance_m);
             places.truncate(120);
+            let total = places.len();
             let response = ScanResponse {
                 places,
                 scanned_at_unix: now_unix(),
                 source: "OpenStreetMap",
                 cached: false,
+                total_matches: total,
             };
             state.cache.lock().await.insert(
                 key,
