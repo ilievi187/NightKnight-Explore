@@ -30,6 +30,8 @@ On Linux/macOS: `cd crates/api && cargo run` and, separately, `cd apps/web && np
 
 Set coordinates manually (Sofia is only a sample starting point) or explicitly allow browser location. Choose a radius from 500 m to 10 km and optional category filters. Click **Scan area**. The server fetches POIs near the chosen coordinates, deduplicates, and sorts by actual geographic distance. The UI does not invent popularity, reviews, open-hours or ratings. Click the OSM link to inspect the original place record.
 
+Use **Save place** on a result to keep its OpenStreetMap record ID and canonical source URL in this browser's local storage. Saved links remain on this device and can be removed individually or cleared together. NightKnight Explore does not store scan history, names, coordinates, or search terms in favorites; clearing browser site data also removes saved links.
+
 The public Overpass endpoint is a shared resource: this MVP enforces an 8-second cooldown, 15-minute in-memory cache and a limit of 10 km per query; it is **not** appropriate for high-volume production traffic. For public deployment provide your own properly provisioned Overpass instance or another licensed POI data provider. Tile loading must likewise follow the [OSM Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/).
 
 ## API

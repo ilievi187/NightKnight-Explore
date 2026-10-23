@@ -16,6 +16,7 @@ jobs:
         with:
           node-version: '22'
       - run: npm ci --no-audit --no-fund
+      - run: npm test
       - run: npm run typecheck
       - run: npm run build
   rust:
