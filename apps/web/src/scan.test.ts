@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { gemTier, gemTierLabel, prettyDistance, prettyElapsed, scanProgressNote } from './scan'
+import { gemTier, gemTierLabel, prettyDistance, prettyElapsed, readJsonBody, scanErrorMessage, scanProgressNote } from './scan'
 
 describe('distance formatting', () => {
   it('keeps meters below a kilometer', () => {
@@ -60,5 +60,53 @@ describe('gem tiers', () => {
     expect(gemTierLabel('rare')).toBe('Rare find')
     expect(gemTierLabel('strong')).toBe('Hidden gem')
     expect(gemTierLabel('notable')).toBe('Notable')
+  })
+})
+
+function fakeResponse(status: number, body: string): Response {
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    text: async () => body,
+  } as unknown as Response
+}
+
+describe('API response parsing', () => {
+  it('parses valid JSON bodies', async () => {
+    await expect(readJsonBody(fakeResponse(200, '{"places":[]}'))).resolves.toEqual({ places: [] })
+  })
+
+  it('reports an empty body without throwing', async () => {
+    await expect(readJsonBody(fakeResponse(500, ''))).resolves.toBeNull()
+  })
+
+  it('reports unparseable bodies without throwing', async () => {
+    await expect(readJsonBody(fakeResponse(502, '<html>bad gateway</html>'))).resolves.toBeUndefined()
+  })
+})
+
+describe('scan error messages', () => {
+  it('uses structured provider errors verbatim with provider and retry hint', () => {
+    const message = scanErrorMessage(fakeResponse(429, ''), {
+      error: 'Scan cooldown: please retry after 8 seconds',
+      code: 'provider_rate_limited',
+      provider_id: 'openstreetmap-overpass',
+      retry_after_seconds: 8,
+    })
+    expect(message).toContain('Scan cooldown')
+    expect(message).toContain('openstreetmap-overpass')
+    expect(message).toContain('retry in 8s')
+  })
+
+  it('explains empty 5xx proxy answers as an unreachable local API', () => {
+    const message = scanErrorMessage(fakeResponse(500, ''), null)
+    expect(message).toContain('did not respond')
+    expect(message).toContain('Rust API')
+  })
+
+  it('never surfaces raw JSON parse exceptions', () => {
+    const message = scanErrorMessage(fakeResponse(400, ''), undefined)
+    expect(message).not.toContain('Unexpected end of JSON')
+    expect(message).toContain('unreadable response')
   })
 })

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { LngLatBounds, Map as MapLibreMap, Marker, NavigationControl } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { addFavorite, clearFavorites, readFavorites, removeFavorite, type FavoritePlace } from './favorites'
-import { gemTier, gemTierLabel, prettyDistance, prettyElapsed, scanProgressNote } from './scan'
+import { gemTier, gemTierLabel, prettyDistance, prettyElapsed, readJsonBody, scanErrorMessage, scanProgressNote } from './scan'
 
 type Category = 'all' | 'food' | 'stay' | 'see' | 'history' | 'nature'
 type GemReason = { text: string; field_path: string; observed_value: string }
@@ -103,12 +103,9 @@ export default function App(){
     const start=Date.now();setStartedAt(start);setElapsed(0)
     try{
       const r=await fetch(`/api/scan?lat=${encodeURIComponent(a)}&lon=${encodeURIComponent(b)}&radius_m=${radius}`,{signal:c.signal})
-      const payload=await r.json()
-      if(!r.ok){
-        const provider=payload?.provider_id?` · ${payload.provider_id}${payload.code?` / ${payload.code}`:''}`:''
-        const retry=payload?.retry_after_seconds?` (retry in ${payload.retry_after_seconds}s)`:''
-        throw new Error(`${payload?.error||`Scan failed (${r.status})`}${provider}${retry}`)
-      }
+      const payload=await readJsonBody(r)
+      if(!r.ok)throw new Error(scanErrorMessage(r,payload))
+      if(!payload||typeof payload!=='object'||!Array.isArray((payload as ScanResponse).places)){throw new Error('The API returned an unexpected response shape. Check that the Rust API version matches the web app.')}
       setData(payload as ScanResponse)
       setScanDuration(Date.now()-start)
     }catch(e){if((e as Error).name!=='AbortError'){const networkHint=e instanceof TypeError?'. Check that the Rust API is running.':'';setError(`${(e as Error).message}${networkHint}`)}}
