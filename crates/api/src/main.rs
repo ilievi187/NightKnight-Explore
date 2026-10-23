@@ -447,7 +447,7 @@ async fn google_details(
 
     let client = state.http.clone();
     let response = client
-        .get(&format!("https://places.googleapis.com/v1/places/{}", place_id))
+        .get(format!("https://places.googleapis.com/v1/places/{}", place_id))
         .header("X-Goog-Api-Key", key)
         .header("X-Goog-FieldMask", "id,displayName,rating,userRatingCount,formattedAddress,websiteUri,internationalPhoneNumber,priceLevel,regularOpeningHours,photos,reviews")
         .send()
