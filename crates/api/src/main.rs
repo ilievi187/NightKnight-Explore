@@ -1,7 +1,7 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Form, Query, State},
     http::{header, HeaderValue, Method, StatusCode},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,10 @@ use tokio::sync::Mutex;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 const OVERPASS_CACHE_TTL: Duration = Duration::from_secs(900);
+const GEOCODER_CACHE_TTL: Duration = Duration::from_secs(86_400);
+const MAX_GEOCODER_CACHE_ENTRIES: usize = 500;
+const GEOCODER_COOLDOWN: Duration = Duration::from_secs(1);
+const GEOCODER_TIMEOUT: Duration = Duration::from_secs(8);
 /// Local safeguard between this server and shared endpoints.
 const COOLDOWN: Duration = Duration::from_secs(8);
 /// Overpass query processing timeout; the client must wait at least this
@@ -45,8 +49,11 @@ const DEFAULT_ENDPOINTS: &[&str] = &[
 struct AppState {
     http: reqwest::Client,
     endpoints: Vec<String>,
+    geocoder_endpoint: String,
     cache: Arc<Mutex<HashMap<String, CachedScan>>>,
+    geocoder_cache: Arc<Mutex<HashMap<String, CachedGeocode>>>,
     last_external_request: Arc<Mutex<Option<Instant>>>,
+    last_geocoder_request: Arc<Mutex<Option<Instant>>>,
     /// Per-endpoint "not before" time after a failure, so later scans skip
     /// endpoints that are currently known-bad.
     endpoint_backoff: Arc<Mutex<HashMap<String, Instant>>>,
@@ -57,12 +64,20 @@ struct CachedScan {
     created: Instant,
     response: ScanResponse,
 }
+struct CachedGeocode {
+    created: Instant,
+    response: GeocodeResponse,
+}
 
 #[derive(Deserialize)]
 struct ScanQuery {
     lat: f64,
     lon: f64,
     radius_m: Option<u32>,
+}
+#[derive(Deserialize)]
+struct GeocodeQuery {
+    q: String,
 }
 #[derive(Serialize, Clone)]
 struct SourceAttribution {
@@ -122,7 +137,22 @@ struct ScanResponse {
     source: &'static str,
     cached: bool,
 }
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
+struct GeocodePlace {
+    id: String,
+    display_name: String,
+    lat: f64,
+    lon: f64,
+    source_url: String,
+}
+#[derive(Serialize, Clone)]
+struct GeocodeResponse {
+    results: Vec<GeocodePlace>,
+    source: &'static str,
+    attribution: SourceAttribution,
+    cached: bool,
+}
+#[derive(Debug, Serialize)]
 struct ApiError {
     error: String,
     code: &'static str,
@@ -194,6 +224,7 @@ async fn main() {
         .with_env_filter("info,tower_http=warn")
         .init();
     let endpoints = configured_endpoints();
+    let geocoder_endpoint = configured_geocoder_endpoint();
     let bind = env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8787".to_owned());
     let address: std::net::SocketAddr = bind.parse().expect("Invalid BIND_ADDRESS");
     if !address.ip().is_loopback() {
@@ -207,14 +238,17 @@ async fn main() {
             .build()
             .expect("HTTP client error"),
         endpoints,
+        geocoder_endpoint,
         cache: Arc::new(Mutex::new(HashMap::new())),
+        geocoder_cache: Arc::new(Mutex::new(HashMap::new())),
         last_external_request: Arc::new(Mutex::new(None)),
+        last_geocoder_request: Arc::new(Mutex::new(None)),
         endpoint_backoff: Arc::new(Mutex::new(HashMap::new())),
         last_retry_after: Arc::new(Mutex::new(None)),
     };
     let cors = CorsLayer::new()
         .allow_origin("http://127.0.0.1:5173".parse::<HeaderValue>().unwrap())
-        .allow_methods([Method::GET])
+        .allow_methods([Method::GET, Method::POST])
         .allow_headers([header::CONTENT_TYPE]);
     let app = Router::new()
         .route(
@@ -224,6 +258,7 @@ async fn main() {
             }),
         )
         .route("/api/scan", get(scan))
+        .route("/api/geocode", post(geocode))
         .with_state(state)
         .layer(cors)
         .layer(TraceLayer::new_for_http());
@@ -258,8 +293,18 @@ fn configured_endpoints() -> Vec<String> {
 
 fn validate_endpoint(url: &str) {
     if !url.starts_with("https://") && !url.starts_with("http://127.0.0.1:") {
-        panic!("OVERPASS_ENDPOINT must use HTTPS or local loopback HTTP");
+        panic!("Provider endpoints must use HTTPS or local loopback HTTP");
     }
+}
+
+/// Endpoint for explicit end-user place searches. The public Nominatim
+/// service is a low-volume default for this local-first prototype; operators
+/// can switch providers without a software update by setting this value.
+fn configured_geocoder_endpoint() -> String {
+    let endpoint = env::var("GEOCODER_ENDPOINT")
+        .unwrap_or_else(|_| "https://nominatim.openstreetmap.org/search".to_owned());
+    validate_endpoint(&endpoint);
+    endpoint
 }
 
 async fn scan(
@@ -334,6 +379,229 @@ async fn scan(
             ))
         }
     }
+}
+
+/// Explicit, user-submitted place lookup. This is deliberately not an
+/// autocomplete endpoint: each call must follow a user action, and the
+/// public Nominatim policy is enforced by a shared one-request/second gate.
+async fn geocode(
+    State(state): State<AppState>,
+    Form(q): Form<GeocodeQuery>,
+) -> Result<Json<GeocodeResponse>, (StatusCode, Json<ApiError>)> {
+    let query = q.q.split_whitespace().collect::<Vec<_>>().join(" ");
+    if query.chars().count() < 2 || query.chars().count() > 200 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_geocode_query",
+            "Enter a place name or location (2–200 characters)",
+            None,
+            None,
+        ));
+    }
+    let key = query.to_lowercase();
+    {
+        let mut cache = state.geocoder_cache.lock().await;
+        cache.retain(|_, hit| hit.created.elapsed() < GEOCODER_CACHE_TTL);
+        if let Some(hit) = cache.get(&key) {
+            let mut response = hit.response.clone();
+            response.cached = true;
+            return Ok(Json(response));
+        }
+    }
+
+    let mut last_request = state.last_geocoder_request.lock().await;
+    if let Some(last) = *last_request {
+        if last.elapsed() < GEOCODER_COOLDOWN {
+            let retry = GEOCODER_COOLDOWN.as_secs().max(1);
+            return Err(api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "provider_rate_limited",
+                "Place search is rate limited; wait before searching again",
+                Some("openstreetmap-nominatim"),
+                Some(retry),
+            ));
+        }
+    }
+    *last_request = Some(Instant::now());
+    drop(last_request);
+
+    let request = state
+        .http
+        .get(&state.geocoder_endpoint)
+        .query(&[("q", query.as_str()), ("format", "jsonv2"), ("limit", "5")])
+        .send();
+    let request_deadline = Instant::now() + GEOCODER_TIMEOUT;
+    let response = tokio::time::timeout(
+        request_deadline.saturating_duration_since(Instant::now()),
+        request,
+    )
+    .await
+    .map_err(|_| {
+        geocoder_error(
+            StatusCode::BAD_GATEWAY,
+            "provider_timeout",
+            "Place search timed out; try again later",
+            None,
+        )
+    })?
+    .map_err(|error| {
+        tracing::warn!("Nominatim unavailable: {error}");
+        geocoder_error(
+            StatusCode::BAD_GATEWAY,
+            "provider_unavailable",
+            "Place search provider unavailable",
+            None,
+        )
+    })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .or(Some(GEOCODER_COOLDOWN.as_secs()));
+            return Err(geocoder_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "provider_rate_limited",
+                "Place search provider is rate limiting requests",
+                retry_after,
+            ));
+        }
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            let retry_after = response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<u64>().ok());
+            return Err(geocoder_error(
+                StatusCode::BAD_GATEWAY,
+                "provider_unavailable",
+                "Place search provider is temporarily unavailable",
+                retry_after,
+            ));
+        }
+        tracing::warn!(status=%status, "Nominatim returned an error");
+        return Err(geocoder_error(
+            StatusCode::BAD_GATEWAY,
+            "provider_unavailable",
+            "Place search provider returned an error",
+            None,
+        ));
+    }
+
+    let payload: Vec<serde_json::Value> = tokio::time::timeout(
+        request_deadline.saturating_duration_since(Instant::now()),
+        response.json(),
+    )
+    .await
+    .map_err(|_| {
+        geocoder_error(
+            StatusCode::BAD_GATEWAY,
+            "provider_timeout",
+            "Place search response timed out; try again later",
+            None,
+        )
+    })?
+    .map_err(|_| {
+        geocoder_error(
+            StatusCode::BAD_GATEWAY,
+            "provider_invalid_response",
+            "Invalid place search response",
+            None,
+        )
+    })?;
+    let results: Vec<GeocodePlace> = payload
+        .iter()
+        .filter_map(nominatim_result)
+        .take(5)
+        .collect();
+    if !payload.is_empty() && results.is_empty() {
+        return Err(geocoder_error(
+            StatusCode::BAD_GATEWAY,
+            "provider_invalid_response",
+            "Place search provider returned no usable records",
+            None,
+        ));
+    }
+    let result = GeocodeResponse {
+        results,
+        source: "OpenStreetMap Nominatim",
+        attribution: SourceAttribution {
+            provider_id: "openstreetmap-nominatim",
+            label: "OpenStreetMap contributors",
+            text: "© OpenStreetMap contributors",
+            url: "https://www.openstreetmap.org/copyright",
+            license: "ODbL-1.0",
+        },
+        cached: false,
+    };
+    let mut cache = state.geocoder_cache.lock().await;
+    if cache.len() >= MAX_GEOCODER_CACHE_ENTRIES {
+        if let Some(oldest_key) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.created)
+            .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest_key);
+        }
+    }
+    cache.insert(
+        key,
+        CachedGeocode {
+            created: Instant::now(),
+            response: result.clone(),
+        },
+    );
+    Ok(Json(result))
+}
+
+fn nominatim_result(value: &serde_json::Value) -> Option<GeocodePlace> {
+    let kind = value.get("osm_type")?.as_str()?;
+    if !matches!(kind, "node" | "way" | "relation") {
+        return None;
+    }
+    let osm_id = value.get("osm_id")?.as_i64()?;
+    if osm_id <= 0 {
+        return None;
+    }
+    let lat = value.get("lat")?.as_str()?.parse::<f64>().ok()?;
+    let lon = value.get("lon")?.as_str()?.parse::<f64>().ok()?;
+    if !lat.is_finite()
+        || !lon.is_finite()
+        || !(-90.0..=90.0).contains(&lat)
+        || !(-180.0..=180.0).contains(&lon)
+    {
+        return None;
+    }
+    let display_name = value.get("display_name")?.as_str()?.trim();
+    if display_name.is_empty() {
+        return None;
+    }
+    Some(GeocodePlace {
+        id: format!("{kind}-{osm_id}"),
+        display_name: display_name.to_owned(),
+        lat,
+        lon,
+        source_url: format!("https://www.openstreetmap.org/{kind}/{osm_id}"),
+    })
+}
+
+fn geocoder_error(
+    status: StatusCode,
+    code: &'static str,
+    message: &str,
+    retry_after_seconds: Option<u64>,
+) -> (StatusCode, Json<ApiError>) {
+    api_error(
+        status,
+        code,
+        message,
+        Some("openstreetmap-nominatim"),
+        retry_after_seconds,
+    )
 }
 
 /// POST form body Overpass query. POST rather than enormous query strings;
@@ -854,11 +1122,20 @@ mod tests {
                 .build()
                 .unwrap(),
             endpoints,
+            geocoder_endpoint: "https://nominatim.openstreetmap.org/search".into(),
             cache: Arc::new(Mutex::new(HashMap::new())),
+            geocoder_cache: Arc::new(Mutex::new(HashMap::new())),
             last_external_request: Arc::new(Mutex::new(None)),
+            last_geocoder_request: Arc::new(Mutex::new(None)),
             endpoint_backoff: Arc::new(Mutex::new(HashMap::new())),
             last_retry_after: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn test_state_with_geocoder(endpoint: String) -> AppState {
+        let mut state = test_state(vec![], 20_000);
+        state.geocoder_endpoint = endpoint;
+        state
     }
 
     /// One scripted upstream response. Empty-body entries stand in for
@@ -967,6 +1244,42 @@ mod tests {
         (format!("http://{address}/api/interpreter"), hits)
     }
 
+    async fn mock_geocoder() -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hit_counter = hits.clone();
+        let app = Router::new().route(
+            "/search",
+            get(move || {
+                let hits = hit_counter.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!([
+                        {
+                            "osm_type": "relation",
+                            "osm_id": 8311615,
+                            "lat": "42.697278",
+                            "lon": "23.3217279",
+                            "display_name": "Pretorium, Sofia, Bulgaria"
+                        },
+                        {
+                            "osm_type": "bad-type",
+                            "osm_id": 9,
+                            "lat": "0",
+                            "lon": "0",
+                            "display_name": "Should be skipped"
+                        }
+                    ]))
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}/search"), hits)
+    }
+
     #[test]
     fn distance_zero() {
         assert!(haversine(43.0, 27.0, 43.0, 27.0) < 0.01);
@@ -1041,6 +1354,111 @@ mod tests {
         assert_eq!(payload.code, "provider_rate_limited");
         assert_eq!(payload.provider_id, Some("openstreetmap-overpass"));
         assert_eq!(payload.retry_after_seconds, Some(8));
+    }
+
+    #[test]
+    fn nominatim_result_uses_only_valid_canonical_osm_records() {
+        let valid = serde_json::json!({
+            "osm_type":"relation", "osm_id":42, "lat":"43.2", "lon":"27.9",
+            "display_name":"Historic Square, Varna"
+        });
+        let place = nominatim_result(&valid).unwrap();
+        assert_eq!(place.id, "relation-42");
+        assert_eq!(place.display_name, "Historic Square, Varna");
+        assert_eq!(
+            place.source_url,
+            "https://www.openstreetmap.org/relation/42"
+        );
+
+        let invalid_kind = serde_json::json!({
+            "osm_type":"area", "osm_id":42, "lat":"43.2", "lon":"27.9",
+            "display_name":"Unknown"
+        });
+        assert!(nominatim_result(&invalid_kind).is_none());
+        let invalid_coords = serde_json::json!({
+            "osm_type":"node", "osm_id":43, "lat":"91", "lon":"27.9",
+            "display_name":"Out of range"
+        });
+        assert!(nominatim_result(&invalid_coords).is_none());
+    }
+
+    #[tokio::test]
+    async fn geocoder_normalizes_explicit_search_and_caches_results() {
+        let (endpoint, hits) = mock_geocoder().await;
+        let state = test_state_with_geocoder(endpoint);
+
+        let Json(first) = geocode(
+            State(state.clone()),
+            Form(GeocodeQuery {
+                q: "  Sofia   Bulgaria  ".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(cached) = geocode(
+            State(state),
+            Form(GeocodeQuery {
+                q: "sofia bulgaria".into(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(!first.cached);
+        assert!(cached.cached);
+        assert_eq!(
+            first.results.len(),
+            1,
+            "invalid upstream record is filtered"
+        );
+        assert_eq!(
+            first.results[0].source_url,
+            "https://www.openstreetmap.org/relation/8311615"
+        );
+        assert_eq!(first.attribution.provider_id, "openstreetmap-nominatim");
+    }
+
+    #[tokio::test]
+    async fn geocoder_enforces_one_second_cooldown_without_provider_call() {
+        let (endpoint, hits) = mock_geocoder().await;
+        let state = test_state_with_geocoder(endpoint);
+        *state.last_geocoder_request.lock().await = Some(Instant::now());
+
+        let Err((status, Json(payload))) =
+            geocode(State(state), Form(GeocodeQuery { q: "Varna".into() })).await
+        else {
+            panic!("cooldown should reject the request");
+        };
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(payload.code, "provider_rate_limited");
+        assert_eq!(payload.provider_id, Some("openstreetmap-nominatim"));
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn geocoder_rejects_too_short_queries_without_provider_call() {
+        let (endpoint, hits) = mock_geocoder().await;
+        let state = test_state_with_geocoder(endpoint);
+        let Err((status, Json(payload))) =
+            geocode(State(state.clone()), Form(GeocodeQuery { q: "x".into() })).await
+        else {
+            panic!("short query should be rejected");
+        };
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(payload.code, "invalid_geocode_query");
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        let Err((long_status, Json(long_payload))) =
+            geocode(State(state), Form(GeocodeQuery { q: "x".repeat(201) })).await
+        else {
+            panic!("overlong query should be rejected");
+        };
+        assert_eq!(long_status, StatusCode::BAD_REQUEST);
+        assert_eq!(long_payload.code, "invalid_geocode_query");
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
     }
 
     #[test]

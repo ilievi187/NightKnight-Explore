@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import type { Map as MapLibreMap, Marker } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { addFavorite, clearFavorites, readFavorites, removeFavorite, type FavoritePlace } from './favorites'
-import { gemTier, gemTierLabel, prettyDistance, prettyElapsed, readJsonBody, scanErrorMessage, scanProgressNote } from './scan'
+import { gemTier, gemTierLabel, normalizePlaceQuery, prettyDistance, prettyElapsed, readJsonBody, scanErrorMessage, scanProgressNote } from './scan'
 
 type Category = 'all' | 'food' | 'stay' | 'see' | 'history' | 'nature'
 type GemReason = { text: string; field_path: string; observed_value: string }
@@ -10,6 +10,8 @@ type GemSignal = { score: number; method: string; reasons: GemReason[] }
 type SourceAttribution = { provider_id: string; label: string; text: string; url: string; license: string }
 type Place = { id: string; name: string; category: Exclude<Category,'all'>; lat: number; lon: number; distance_m: number; source: string; source_url: string; attribution: SourceAttribution; website: string | null; gem: GemSignal | null }
 type ScanResponse = { places: Place[]; scanned_at_unix: number; source: string; cached: boolean }
+type GeocodePlace = { id: string; display_name: string; lat: number; lon: number; source_url: string }
+type GeocodeResponse = { results: GeocodePlace[]; source: string; attribution: SourceAttribution; cached: boolean }
 const categories: { key: Category; label: string; icon: string }[] = [
   {key:'all',label:'Everything',icon:'✦'}, {key:'see',label:'Attractions',icon:'⌁'},
   {key:'history',label:'Historical',icon:'⌂'}, {key:'nature',label:'Nature',icon:'❧'},
@@ -75,6 +77,10 @@ export default function App(){
   const [favorites,setFavorites]=useState<FavoritePlace[]>(()=>readFavorites())
   const [lat,setLat]=useState('42.6977')
   const [lon,setLon]=useState('23.3219')
+  const [placeSearch,setPlaceSearch]=useState('')
+  const [geocodeResults,setGeocodeResults]=useState<GeocodePlace[]>([])
+  const [geocodeBusy,setGeocodeBusy]=useState(false)
+  const [geocodeError,setGeocodeError]=useState('')
   const [radius,setRadius]=useState(2500)
   const [category,setCategory]=useState<Category>('all')
   const [search,setSearch]=useState('')
@@ -125,6 +131,24 @@ export default function App(){
     }catch(e){if((e as Error).name!=='AbortError'){const networkHint=e instanceof TypeError?'. Check that the Rust API is running.':'';setError(`${(e as Error).message}${networkHint}`)}}
     finally{if(controller.current===c){setBusy(false);setStartedAt(null)}}
   }
+  const searchLocation=async(event:FormEvent<HTMLFormElement>)=>{
+    event.preventDefault()
+    const query=normalizePlaceQuery(placeSearch)
+    if(!query){setGeocodeError('Enter 2–200 characters to search.');return}
+    setGeocodeBusy(true);setGeocodeError('');setGeocodeResults([])
+    try{
+      const response=await fetch('/api/geocode',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({q:query})})
+      const payload=await readJsonBody(response)
+      if(!response.ok)throw new Error(scanErrorMessage(response,payload))
+      if(!payload||typeof payload!=='object'||!Array.isArray((payload as GeocodeResponse).results))throw new Error('The place search returned an unexpected response. Check that the Rust API version matches the web app.')
+      setGeocodeResults((payload as GeocodeResponse).results)
+      if((payload as GeocodeResponse).results.length===0)setGeocodeError('No matching places found. Try a more specific name or nearby city.')
+    }catch(error){setGeocodeError(error instanceof TypeError?'Place search is unavailable. Check that the Rust API is running.':(error as Error).message)}
+    finally{setGeocodeBusy(false)}
+  }
+  const chooseLocation=(result:GeocodePlace)=>{
+    setLat(result.lat.toFixed(6));setLon(result.lon.toFixed(6));setPlaceSearch(result.display_name);setGeocodeResults([]);setGeocodeError('');setSelected(null)
+  }
   useEffect(()=>{
     if(startedAt===null)return
     const timer=setInterval(()=>setElapsed(Date.now()-startedAt),1000)
@@ -156,6 +180,13 @@ export default function App(){
       <section className="hero"><div className="hero-bg"/><div className="eyebrow">✦ &nbsp; YOUR WORLD, REVEALED</div><h1>Discover what’s <em>around you.</em></h1><p>One scan. Real restaurants, places to stay, historical landmarks and hidden natural corners — real OpenStreetMap records with transparent, explained gem signals. No invented ratings.</p><div className="hero-metrics"><span><strong>5</strong> DISCOVERY CATEGORIES</span><span><strong>10 KM</strong> MAX RADIUS</span><span><strong>OPEN</strong> SOURCE DATA</span></div></section>
       <section className="workbench">
         <div className="panel controls"><div className="section-heading"><span className="blue-bar"/><div><div className="overline">SCAN PARAMETERS</div><h2>Set your coordinates</h2></div></div>
+          <form className="place-search" onSubmit={searchLocation}>
+            <label htmlFor="place-search">SEARCH A PLACE</label>
+            <div className="place-search-row"><input id="place-search" type="search" maxLength={200} value={placeSearch} onChange={event=>setPlaceSearch(event.target.value)} placeholder="City, landmark or address" autoComplete="off"/><button className="ghost" type="submit" disabled={geocodeBusy}>{geocodeBusy?'Searching…':'Search'}</button></div>
+            <p className="geocode-attribution">Submitted search is sent to the configured provider; query/results cache in API memory up to 24 hours. Do not enter private data. Public Nominatim allows max 1 request/sec app-wide; no autocomplete. <a href="https://operations.osmfoundation.org/policies/nominatim/" target="_blank" rel="noopener noreferrer">Usage policy</a> · © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a></p>
+            {geocodeError&&<p className="geocode-message" role="status">{geocodeError}</p>}
+            {geocodeResults.length>0&&<ul className="geocode-results" aria-label="Place search results">{geocodeResults.map(result=><li key={result.id}><button type="button" className="geocode-choice" onClick={()=>chooseLocation(result)}><span>{result.display_name}</span><small>Use as scan center</small></button><a className="geocode-record" href={result.source_url} target="_blank" rel="noopener noreferrer" aria-label={`Open ${result.display_name} in OpenStreetMap`} onClick={event=>event.stopPropagation()}>↗</a></li>)}</ul>}
+          </form>
           <div className="form-grid"><label>LATITUDE<input type="number" value={lat} onChange={e=>setLat(e.target.value)} step="any" min="-90" max="90"/></label><label>LONGITUDE<input type="number" value={lon} onChange={e=>setLon(e.target.value)} step="any" min="-180" max="180"/></label></div>
           <button className="ghost locate" onClick={locate} disabled={locating}>{locating?'Locating…':'◎ Use my location (optional)'}</button>
           <div className="radius-label"><label htmlFor="radius">SCAN RADIUS</label><strong>{prettyDistance(radius)}</strong></div><input id="radius" className="range" type="range" min="500" max="10000" step="500" value={radius} onChange={e=>setRadius(Number(e.target.value))}/>
