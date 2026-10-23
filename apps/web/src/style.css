@@ -6,3 +6,4 @@
 .map-origin{width:14px;height:14px;border:2px solid #55e5a9;background:#55e5a933;border-radius:50%;box-shadow:0 0 12px #55e5a9aa}
 .maplibregl-marker .place-marker{transition:transform .15s ease}.maplibregl-marker .place-marker:hover{transform:scale(1.18)}
 .scan-progress{color:#8edcff;font-size:11px;margin:12px 0 0;border:1px dashed #1d5070;border-radius:8px;padding:10px;background:#0a1f30}
+.map-loading{position:absolute;inset:0;display:grid;place-items:center;color:#7fb2d4;font-size:12px;letter-spacing:1.5px;background:radial-gradient(ellipse at center,#0d2233 0%,#081524 70%);z-index:1}
