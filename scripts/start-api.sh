@@ -1,38 +1,41 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-# Start the NightKnight Explore Rust API server
-# Binds to 127.0.0.1:8787 by default; override BIND_ADDRESS and PORT as needed
+# Consistent local Explore ports:
+# API 127.0.0.1:8792; Vite 127.0.0.1:5199; 8787 is reserved for OmO Board.
+# Override BIND_ADDRESS (complete host:port) and set EXPLORE_API_TARGET to match.
 
-cd "$(dirname "$0")/.."
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+command -v cargo >/dev/null || { echo "Cargo is required." >&2; exit 1; }
 
-if ! command -v cargo &> /dev/null; then
-  echo "Error: Cargo is not installed. See https://rustup.rs"
-  exit 1
+export RUST_LOG="${RUST_LOG:-info}"
+export BIND_ADDRESS="${BIND_ADDRESS:-127.0.0.1:8792}"
+if [[ -z "${OSM_DB_PATH:-}" && -f "$ROOT/data/osm-bulgaria.db" ]]; then
+  export OSM_DB_PATH="$ROOT/data/osm-bulgaria.db"
 fi
 
-export RUST_LOG=${RUST_LOG:-info}
-export OVERPASS_ENDPOINT=${OVERPASS_ENDPOINT:-}
-export GEOCODER_ENDPOINT=${GEOCODER_ENDPOINT:-}
+BASE="http://$BIND_ADDRESS"
+if curl -fsS --max-time 3 "$BASE/api/health" | grep -q '"NightKnight Explore API"'; then
+  echo "NightKnight Explore API already running at $BASE"
+  exit 0
+fi
 
-BIND=${BIND_ADDRESS:-127.0.0.1}
-PORT=${PORT_NUMBER:-8787}
-
-echo "Starting NightKnight Explore API on $BIND:$PORT"
-cargo run --bin nightknight-explore-api -- --bind-address "${BIND}:${PORT}" ${OVERPASS_ENDPOINT:+--overpass-endpoint "$OVERPASS_ENDPOINT"} ${GEOCODER_ENDPOINT:+--geocoder-endpoint "$GEOCODER_ENDPOINT"} &
+echo "Starting NightKnight Explore API on $BIND_ADDRESS"
+(cd "$ROOT/crates/api" && cargo run --bin nightknight-explore-api) &
 API_PID=$!
-echo "API started (PID $API_PID)"
-echo "Save PID to file: .api-pid"
-echo $API_PID > .api-pid
+echo "$API_PID" > "$ROOT/.api-pid"
 
-# Wait for server to be ready
-for i in $(seq 1 30); do
-  if curl -s "http://${BIND}:${PORT}/api/health" > /dev/null 2>&1; then
-    echo "API is ready."
+for _ in $(seq 1 120); do
+  if curl -fsS --max-time 2 "$BASE/api/health" | grep -q '"NightKnight Explore API"'; then
+    echo "Explore API ready at $BASE"
     exit 0
+  fi
+  if ! kill -0 "$API_PID" 2>/dev/null; then
+    echo "Explore API exited before becoming ready." >&2
+    exit 1
   fi
   sleep 1
 done
-
-echo "Warning: API did not become ready within 30 seconds"
-exit 0
+echo "Explore API did not become ready; check its log." >&2
+exit 1
