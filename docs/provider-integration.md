@@ -32,7 +32,7 @@ HTTP status mapping in this MVP: invalid scan input is 400; local Overpass coold
 | OpenStreetMap raster tiles | Displayed by MapLibre | Tiles are requested from `tile.openstreetmap.org`; the app does not add its own tile cache. Browser/network caching and display must follow the OSM Tile Usage Policy. |
 | Google Places | Not configured / unavailable | No requests, caching, storage, or display until the owner approves a provider-specific license, account, attribution, caching, retention, display, privacy, and cost review. No scraping. |
 | Reddit | Not configured / unavailable | No requests, caching, storage, or display until official API authorization and current terms permit the intended use and retention. No HTML scraping or access-control bypass. See the [eligibility assessment](reddit-api-assessment.md). |
-| Search and summary providers | Not configured / unavailable | Do not retain source material or generated output until source permissions, attribution, copyright, privacy, deletion, and retention rules are reviewed and recorded. |
+| Search and summary providers | Not configured / unavailable | Do not retain source material or generated output until source permissions, attribution, copyright, privacy, deletion, and retention rules are reviewed and recorded. See the [evidence-linked summary design](evidence-linked-summary-design.md). |
 
 Provider adapters must declare their own cache TTL, storage rules, attribution renderer, and deletion behavior. Do not inherit the Overpass policy by default: a provider's terms may prohibit or constrain storage. If a policy is unknown, disable the adapter and report it as unavailable.
 
