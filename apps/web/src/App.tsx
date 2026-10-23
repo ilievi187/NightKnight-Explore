@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import type { Map as MapLibreMap, Marker } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
+import GoogleMap from './GoogleMap'
 import { addFavorite, clearFavorites, readFavorites, removeFavorite, type FavoritePlace } from './favorites'
 import { gemTier, gemTierLabel, normalizePlaceQuery, prettyDistance, prettyElapsed, readJsonBody, scanErrorMessage, scanProgressNote } from './scan'
 
@@ -83,6 +84,8 @@ function ExploreMap({places, lat, lon, selected, onSelect}:{places: Place[],lat:
 
 export default function App(){
   const [screen,setScreen]=useState<'discover'|'saved'>('discover')
+  const [providerMode,setProviderMode]=useState<'overpass'|'google'>('overpass')
+  const [googleApiKey,setGoogleApiKey]=useState('')
   const [favorites,setFavorites]=useState<FavoritePlace[]>(()=>readFavorites())
   const [lat,setLat]=useState('42.6977')
   const [lon,setLon]=useState('23.3219')
@@ -178,6 +181,16 @@ export default function App(){
     {enableHighAccuracy:false,timeout:10000,maximumAge:120000})
   }
   useEffect(()=>()=>{controller.current?.abort()},[])
+  useEffect(()=>{
+    // Check provider configuration from backend
+    fetch('/api/provider').then(r=>r.json()).then(data=>{
+      // Google API key for browser is set via Vite env var VITE_GOOGLE_MAPS_API_KEY
+      // Backend API key is separate (server-side, restricted)
+      if(data?.google_api_configured){
+        setGoogleApiKey(import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '')
+      }
+    }).catch(()=>{})
+  },[])
   return <div className="shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark">N<span>✦</span></div><div><strong>NightKnight</strong><small>EXPLORE / 01</small></div></div>
@@ -191,7 +204,7 @@ export default function App(){
     <main className="main">
       <header className="topbar"><nav className="view-switch" aria-label="Explore views"><button className={screen==='discover'?'view-active':''} aria-current={screen==='discover'?'page':undefined} onClick={()=>setScreen('discover')}>Discover</button><button className={screen==='saved'?'view-active':''} aria-current={screen==='saved'?'page':undefined} onClick={()=>setScreen('saved')}>Saved places ({favorites.length})</button></nav><div className="status-pill"><span className="live-dot"/> ALPHA 0.1 · FOSS</div></header>
       {screen==='discover'&&<>
-      <section className="hero"><div className="hero-bg"/><div className="eyebrow">✦ &nbsp; YOUR WORLD, REVEALED</div><h1>Discover what’s <em>around you.</em></h1><p>One scan. Real restaurants, places to stay, historical landmarks and hidden natural corners — real OpenStreetMap records with transparent, explained gem signals. No invented ratings.</p><div className="hero-metrics"><span><strong>5</strong> DISCOVERY CATEGORIES</span><span><strong>10 KM</strong> MAX RADIUS</span><span><strong>OPEN</strong> SOURCE DATA</span></div></section>
+      <section className="hero"><div className="hero-bg"/><div className="eyebrow">✦ &nbsp; YOUR WORLD, REVEALED</div><h1>Discover what’s <em>around you.</em></h1><p>One scan. Real restaurants, places to stay, historical landmarks and hidden natural corners — real OpenStreetMap records with transparent, explained gem signals. No invented ratings.</p><div className="hero-metrics"><span><strong>5</strong> DISCOVERY CATEGORIES</span><span><strong>10 KM</strong> MAX RADIUS</span><span><strong>OPEN</strong> SOURCE DATA</span></div><div className="provider-toggle" role="group" aria-label="Select data provider"><button className={providerMode==='overpass'?'active':''} onClick={()=>setProviderMode('overpass')} aria-pressed={providerMode==='overpass'}>🗺 OpenStreetMap</button><button className={providerMode==='google'?'active':''} onClick={()=>setProviderMode('google')} aria-pressed={providerMode==='google'} disabled={!googleApiKey}>🌐 Google Maps{!googleApiKey&&' (not configured)'}</button></div></section>
       <section className="workbench">
         <div className="panel controls"><div className="section-heading"><span className="blue-bar"/><div><div className="overline">SCAN PARAMETERS</div><h2>Set your coordinates</h2></div></div>
           <form className="place-search" onSubmit={searchLocation}>
@@ -209,7 +222,7 @@ export default function App(){
           {busy&&<p role="status" className="scan-progress" aria-live="polite">⌛ {scanProgressNote(elapsed,isCached)} ({prettyElapsed(elapsed)})</p>}
           {error&&<p role="alert" className="error">⚠ {error}</p>}
         </div>
-        <div className="panel map-panel"><div className="map-heading"><div><span className="overline">GEOSPATIAL VIEW</span><h2>Area overview</h2></div><span className="map-chip">◉ LIVE MAP</span></div><ExploreMap places={places} lat={Number(lat)} lon={Number(lon)} selected={selected} onSelect={selectPlace}/>
+        <div className="panel map-panel"><div className="map-heading"><div><span className="overline">GEOSPATIAL VIEW</span><h2>Area overview</h2></div><span className="map-chip">◉ LIVE MAP</span></div>{providerMode==='google'&&googleApiKey?<GoogleMap lat={Number(lat)} lon={Number(lon)} apiKey={googleApiKey}/>:<ExploreMap places={places} lat={Number(lat)} lon={Number(lon)} selected={selected} onSelect={selectPlace}/>}
         </div>
       </section>
       <section className="results" aria-labelledby="discovery-results-title"><div className="results-header"><div><div className="overline">DISCOVERY RESULTS</div><h2 id="discovery-results-title">{data?`${places.length} places found`:'Your next discovery starts here'}</h2><p>{data?`Source: ${data.source} • ${data.cached?'cached scan':'fresh scan'}${scanDuration!==null&&!data.cached?` • completed in ${prettyElapsed(scanDuration)}`:''} • ${sortBy==='gems'?'gem signals first':'distance-sorted'} results`:'Choose a location and start a scan to find real nearby places.'}</p></div><div className="results-tools"><button className="ghost sort-toggle" aria-pressed={sortBy==='gems'} onClick={()=>setSortBy(sortBy==='gems'?'distance':'gems')} disabled={!data||data.places.every(p=>!p.gem)}>{sortBy==='gems'?'Ⓓ Distance first':'✦ Hidden gems first'}</button><input className="search" aria-label="Search scanned places" placeholder="⌕ Search results" value={search} onChange={e=>setSearch(e.target.value)}/></div></div>
@@ -238,7 +251,7 @@ export default function App(){
       </div></section>
       </>}
       {screen==='saved'&&<section className="results saved-results"><div className="results-header"><div><div className="overline">ON THIS DEVICE ONLY</div><h2>Saved place links</h2><p>Only selected OpenStreetMap IDs and source URLs are stored in this browser. Scans and coordinates are not saved.</p></div>{favorites.length>0&&<button className="ghost clear-favorites" onClick={deleteAllFavorites}>Clear all saved places</button>}</div>{error&&<p role="alert" className="error">⚠ {error}</p>}<div className="places">{favorites.length===0?<div className="empty"><span>☆</span><strong>No saved places</strong><p>Save a place from discovery results to keep its OpenStreetMap link here.</p></div>:favorites.map(favorite=><article className="place-card saved-card" key={favorite.id}><div className={`place-symbol ${favorite.category||''}`}>{favorite.category?symbol(favorite.category):'☆'}</div><div className="place-body"><div className="place-type">{favorite.category?categoryLabel(favorite.category):'OpenStreetMap record'}</div><h3 title={favorite.id}>{favorite.name||favorite.id}</h3><div className="place-links"><a href={favorite.source_url} target="_blank" rel="noopener noreferrer">Open record ↗</a><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors ↗</a><button className="favorite-toggle" onClick={()=>deleteFavorite(favorite.id)}>Remove</button></div></div></article>)}</div></section>}
-      <footer>NightKnight Explore · Open-source alpha · Places © OpenStreetMap contributors (ODbL) · No reviews or ratings included in this build.</footer>
+      <footer>NightKnight Explore · Open-source alpha · {providerMode==='google'?'Google Maps Platform (separately licensed) · ':'Places © OpenStreetMap contributors (ODbL) · '}No reviews or ratings included in this build unless Google provider is configured.</footer>
     </main>
   </div>
 }

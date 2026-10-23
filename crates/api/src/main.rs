@@ -59,6 +59,8 @@ struct AppState {
     endpoint_backoff: Arc<Mutex<HashMap<String, Instant>>>,
     /// Retry-After hint most recently seen from an upstream 429/503.
     last_retry_after: Arc<Mutex<Option<u64>>>,
+    /// Google Maps API key, if configured. When None, Google features are disabled.
+    google_api_key: Option<String>,
 }
 struct CachedScan {
     created: Instant,
@@ -245,6 +247,7 @@ async fn main() {
         last_geocoder_request: Arc::new(Mutex::new(None)),
         endpoint_backoff: Arc::new(Mutex::new(HashMap::new())),
         last_retry_after: Arc::new(Mutex::new(None)),
+        google_api_key: env::var("GOOGLE_MAPS_API_KEY").ok(),
     };
     let cors = CorsLayer::new()
         .allow_origin("http://127.0.0.1:5173".parse::<HeaderValue>().unwrap())
@@ -259,6 +262,9 @@ async fn main() {
         )
         .route("/api/scan", get(scan))
         .route("/api/geocode", post(geocode))
+        .route("/api/provider", get(provider_info))
+        .route("/api/google/search", post(google_search))
+        .route("/api/google/details", post(google_details))
         .with_state(state)
         .layer(cors)
         .layer(TraceLayer::new_for_http());
@@ -305,6 +311,122 @@ fn configured_geocoder_endpoint() -> String {
         .unwrap_or_else(|_| "https://nominatim.openstreetmap.org/search".to_owned());
     validate_endpoint(&endpoint);
     endpoint
+}
+
+/// Provider information endpoint. Returns which provider is configured.
+async fn provider_info(State(state): State<AppState>) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let google_configured = state.google_api_key.is_some();
+    Ok(Json(serde_json::json!({
+        "name": if google_configured { "google" } else { "overpass" },
+        "display_name": if google_configured { "Google Maps" } else { "OpenStreetMap (Overpass)" },
+        "description": if google_configured {
+            "Google Maps Platform. Requires API key and billing in Google Cloud."
+        } else {
+            "OpenStreetMap via Overpass API. No billing required."
+        },
+        "requires_billing": google_configured,
+        "google_api_configured": google_configured,
+    })))
+}
+
+/// Google Places nearby search. Only works when GOOGLE_MAPS_API_KEY is set.
+async fn google_search(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let Some(key) = &state.google_api_key else {
+        return Err(provider_error(
+            StatusCode::BAD_REQUEST,
+            OverpassFailure::Unavailable,
+            None,
+        ));
+    };
+
+    let lat = req.get("lat").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let lon = req.get("lon").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let radius = req.get("radius_m").and_then(|v| v.as_u64()).unwrap_or(5000).min(50000);
+    let max_results = req.get("max_results").and_then(|v| v.as_u64()).unwrap_or(20).min(20);
+
+    let client = state.http.clone();
+    let response = client
+        .post("https://places.googleapis.com/v1/places:searchNearby")
+        .header("X-Goog-Api-Key", key)
+        .header("X-Goog-FieldMask", "places.id,places.displayName,places.types,places.rating,places.userRatingCount,places.formattedAddress,places.websiteUri,places.internationalPhoneNumber,places.priceLevel,places.photos")
+        .json(&serde_json::json!({
+            "locationRestriction": {
+                "circle": {
+                    "center": {"latitude": lat, "longitude": lon},
+                    "radius": radius
+                }
+            },
+            "maxResultCount": max_results,
+        }))
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                api_error(StatusCode::GATEWAY_TIMEOUT, "google_timeout", "Google Places request timed out. Try again later.", None, None)
+            } else {
+                api_error(StatusCode::BAD_GATEWAY, "google_upstream_error", "Google Places upstream error. Check Google Cloud quotas and billing.", None, None)
+            }
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(api_error(status, "google_api_error", &format!("Google Places API returned {}: {}", status, body_text), None, None));
+    }
+
+    let google_response: serde_json::Value = response.json().await.map_err(|_| {
+        api_error(StatusCode::BAD_GATEWAY, "google_invalid_response", "Google Places returned unparseable content.", None, None)
+    })?;
+
+    Ok(Json(google_response))
+}
+
+/// Google Place details fetch. Only works when GOOGLE_MAPS_API_KEY is set.
+async fn google_details(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let Some(key) = &state.google_api_key else {
+        return Err(provider_error(
+            StatusCode::BAD_REQUEST,
+            OverpassFailure::Unavailable,
+            None,
+        ));
+    };
+
+    let place_id = req.get("place_id").and_then(|v| v.as_str()).unwrap_or("");
+    if place_id.is_empty() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "invalid_request", "place_id is required", None, None));
+    }
+
+    let client = state.http.clone();
+    let response = client
+        .get(&format!("https://places.googleapis.com/v1/places/{}?key={}", place_id, key))
+        .header("X-Goog-FieldMask", "id,displayName,rating,userRatingCount,formattedAddress,websiteUri,internationalPhoneNumber,priceLevel,regularOpeningHours,photos,reviews")
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                api_error(StatusCode::GATEWAY_TIMEOUT, "google_timeout", "Google Places details request timed out.", None, None)
+            } else {
+                api_error(StatusCode::BAD_GATEWAY, "google_upstream_error", "Google Places details upstream error.", None, None)
+            }
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(api_error(status, "google_api_error", &format!("Google Places details API returned {}: {}", status, body_text), None, None));
+    }
+
+    let details: serde_json::Value = response.json().await.map_err(|_| {
+        api_error(StatusCode::BAD_GATEWAY, "google_invalid_response", "Google Places details returned unparseable content.", None, None)
+    })?;
+
+    Ok(Json(details))
 }
 
 async fn scan(
@@ -1129,6 +1251,7 @@ mod tests {
             last_geocoder_request: Arc::new(Mutex::new(None)),
             endpoint_backoff: Arc::new(Mutex::new(HashMap::new())),
             last_retry_after: Arc::new(Mutex::new(None)),
+            google_api_key: None,
         }
     }
 
