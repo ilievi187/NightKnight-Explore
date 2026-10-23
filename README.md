@@ -9,7 +9,7 @@ Each result can carry a transparent **Hidden Gems signal**: a deterministic scor
 ## Tech stack
 
 - React 19 + TypeScript + Vite frontend with responsive dark UI
-- MapLibre GL JS map with OpenStreetMap raster tiles and attribution
+- MapLibre GL JS map with OpenStreetMap raster tiles and attribution (map engine is lazy-loaded after the app shell)
 - Rust + Axum API (localhost by default)
 - OpenStreetMap/Overpass for discoverable POIs with clearly labelled source
 - Windows-first scripts, Linux-compatible source, GitHub Actions CI

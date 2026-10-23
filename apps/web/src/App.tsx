@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { LngLatBounds, Map as MapLibreMap, Marker, NavigationControl } from 'maplibre-gl'
+import type { Map as MapLibreMap, Marker } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { addFavorite, clearFavorites, readFavorites, removeFavorite, type FavoritePlace } from './favorites'
 import { gemTier, gemTierLabel, prettyDistance, prettyElapsed, readJsonBody, scanErrorMessage, scanProgressNote } from './scan'
@@ -24,36 +24,50 @@ const gemClass = (tier: string) => tier === 'rare' ? 'gem-high' : tier === 'stro
 function ExploreMap({places, lat, lon, selected, onSelect}:{places: Place[],lat:number,lon:number,selected:string|null,onSelect:(id:string)=>void}) {
   const container=useRef<HTMLDivElement>(null)
   const mapRef=useRef<MapLibreMap|null>(null)
+  const maplibreRef=useRef<typeof import('maplibre-gl')|null>(null)
   const markers=useRef<Marker[]>([])
+  const [mapReady,setMapReady]=useState(false)
+  const [mapError,setMapError]=useState(false)
   useEffect(()=>{
-    if(!container.current) return
-    const map=new MapLibreMap({
-      container:container.current,
-      style:{version:8,sources:{osm:{type:'raster',tiles:['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],tileSize:256,attribution:'© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a>'}},layers:[{id:'osm',type:'raster',source:'osm'}]},
-      center:[lon,lat],zoom:12
+    let cancelled=false
+    // MapLibre GL is ~1.3 MB; load it as a separate async chunk so the first
+    // paint of the app does not wait on the map engine.
+    void import('maplibre-gl').then(maplibre=>{
+      if(cancelled||!container.current)return
+      maplibreRef.current=maplibre
+      const map=new maplibre.Map({
+        container:container.current,
+        style:{version:8,sources:{osm:{type:'raster',tiles:['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],tileSize:256,attribution:'© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap contributors</a>'}},layers:[{id:'osm',type:'raster',source:'osm'}]},
+        center:[lon,lat],zoom:12
+      })
+      map.addControl(new maplibre.NavigationControl({showCompass:false}),'top-right')
+      mapRef.current=map
+      setMapReady(true)
+    }).catch(()=>{
+      if(!cancelled)setMapError(true)
     })
-    map.addControl(new NavigationControl({showCompass:false}),'top-right')
-    mapRef.current=map
-    return ()=>{markers.current.forEach(m=>m.remove());markers.current=[];map.remove();mapRef.current=null}
+    return ()=>{cancelled=true;markers.current.forEach(m=>m.remove());markers.current=[];mapRef.current?.remove();mapRef.current=null;maplibreRef.current=null}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   },[])
   useEffect(()=>{
     const map=mapRef.current
-    if(!map || !validLat(lat) || !validLon(lon)) return
+    const maplibre=maplibreRef.current
+    if(!map||!maplibre||!validLat(lat)||!validLon(lon))return
     markers.current.forEach(m=>m.remove());markers.current=[]
     const origin=document.createElement('div');origin.className='map-origin';origin.title='Scan origin'
-    markers.current.push(new Marker({element:origin}).setLngLat([lon,lat]).addTo(map))
+    markers.current.push(new maplibre.Marker({element:origin}).setLngLat([lon,lat]).addTo(map))
     for(const place of places){
       const marker=document.createElement('button');marker.type='button';marker.className=`place-marker ${selected===place.id?'selected':''}`
       marker.textContent=symbol(place.category);marker.title=place.name;marker.setAttribute('aria-label',`Show ${place.name}`)
       marker.addEventListener('click',()=>onSelect(place.id))
-      markers.current.push(new Marker({element:marker,anchor:'bottom'}).setLngLat([place.lon,place.lat]).addTo(map))
+      markers.current.push(new maplibre.Marker({element:marker,anchor:'bottom'}).setLngLat([place.lon,place.lat]).addTo(map))
     }
     if(places.length){
-      const bounds=new LngLatBounds([lon,lat],[lon,lat]);places.forEach(p=>bounds.extend([p.lon,p.lat]));
+      const bounds=new maplibre.LngLatBounds([lon,lat],[lon,lat]);places.forEach(p=>bounds.extend([p.lon,p.lat]));
       map.fitBounds(bounds,{padding:60,maxZoom:14,duration:500})
     }else {map.easeTo({center:[lon,lat],zoom:12,duration:300})}
-  },[places,lat,lon,selected,onSelect])
-  return <div className="map" ref={container} aria-label="Interactive map of scanned places" />
+  },[places,lat,lon,selected,onSelect,mapReady])
+  return <div className="map" ref={container} aria-label="Interactive map of scanned places">{!mapReady&&<div className="map-loading" role={mapError?'alert':'status'}>{mapError?'Map unavailable — reload to try again':'◌ Loading map engine…'}</div>}</div>
 }
 
 export default function App(){
