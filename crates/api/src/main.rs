@@ -314,7 +314,9 @@ fn configured_geocoder_endpoint() -> String {
 }
 
 /// Provider information endpoint. Returns which provider is configured.
-async fn provider_info(State(state): State<AppState>) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+async fn provider_info(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     let google_configured = state.google_api_key.is_some();
     Ok(Json(serde_json::json!({
         "name": if google_configured { "google" } else { "overpass" },
@@ -344,8 +346,16 @@ async fn google_search(
 
     let lat = req.get("lat").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let lon = req.get("lon").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let radius = req.get("radius_m").and_then(|v| v.as_u64()).unwrap_or(5000).min(50000);
-    let max_results = req.get("max_results").and_then(|v| v.as_u64()).unwrap_or(20).min(20);
+    let radius = req
+        .get("radius_m")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5000)
+        .min(50000);
+    let max_results = req
+        .get("max_results")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(20)
+        .min(20);
 
     let client = state.http.clone();
     let response = client
@@ -374,11 +384,23 @@ async fn google_search(
     if !response.status().is_success() {
         let status = response.status();
         let body_text = response.text().await.unwrap_or_default();
-        return Err(api_error(status, "google_api_error", &format!("Google Places API returned {}: {}", status, body_text), None, None));
+        return Err(api_error(
+            status,
+            "google_api_error",
+            &format!("Google Places API returned {}: {}", status, body_text),
+            None,
+            None,
+        ));
     }
 
     let google_response: serde_json::Value = response.json().await.map_err(|_| {
-        api_error(StatusCode::BAD_GATEWAY, "google_invalid_response", "Google Places returned unparseable content.", None, None)
+        api_error(
+            StatusCode::BAD_GATEWAY,
+            "google_invalid_response",
+            "Google Places returned unparseable content.",
+            None,
+            None,
+        )
     })?;
 
     Ok(Json(google_response))
@@ -399,7 +421,13 @@ async fn google_details(
 
     let place_id = req.get("place_id").and_then(|v| v.as_str()).unwrap_or("");
     if place_id.is_empty() {
-        return Err(api_error(StatusCode::BAD_REQUEST, "invalid_request", "place_id is required", None, None));
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "place_id is required",
+            None,
+            None,
+        ));
     }
 
     let client = state.http.clone();
@@ -419,11 +447,26 @@ async fn google_details(
     if !response.status().is_success() {
         let status = response.status();
         let body_text = response.text().await.unwrap_or_default();
-        return Err(api_error(status, "google_api_error", &format!("Google Places details API returned {}: {}", status, body_text), None, None));
+        return Err(api_error(
+            status,
+            "google_api_error",
+            &format!(
+                "Google Places details API returned {}: {}",
+                status, body_text
+            ),
+            None,
+            None,
+        ));
     }
 
     let details: serde_json::Value = response.json().await.map_err(|_| {
-        api_error(StatusCode::BAD_GATEWAY, "google_invalid_response", "Google Places details returned unparseable content.", None, None)
+        api_error(
+            StatusCode::BAD_GATEWAY,
+            "google_invalid_response",
+            "Google Places details returned unparseable content.",
+            None,
+            None,
+        )
     })?;
 
     Ok(Json(details))
