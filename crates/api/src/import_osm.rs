@@ -1,7 +1,9 @@
-use nightknight_explore_api::osm_db::OsmDatabase;
 use osmpbf::ElementReader;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
+
+use nightknight_explore_api::osm_db::OsmDatabase;
 
 fn category_from_tags(tags: &[(String, String)]) -> Option<String> {
     let tag_map: std::collections::HashMap<&str, &str> =
@@ -34,6 +36,51 @@ fn category_from_tags(tags: &[(String, String)]) -> Option<String> {
     None
 }
 
+fn process_node(db: &OsmDatabase, id: i64, lat: f64, lon: f64, tags: &[(String, String)]) {
+    if let Some(cat) = category_from_tags(tags) {
+        let name = tags
+            .iter()
+            .find(|(k, _)| k == "name")
+            .map(|(_, v)| v.as_str());
+        let wikidata = tags
+            .iter()
+            .find(|(k, _)| k == "wikidata")
+            .map(|(_, v)| v.as_str());
+        let wikipedia = tags
+            .iter()
+            .find(|(k, _)| k == "wikipedia")
+            .map(|(_, v)| v.as_str());
+        let website = tags
+            .iter()
+            .find(|(k, _)| k == "website" || k == "contact:website")
+            .map(|(_, v)| v.as_str());
+        let phone = tags
+            .iter()
+            .find(|(k, _)| k == "phone" || k == "contact:phone")
+            .map(|(_, v)| v.as_str());
+        let opening_hours = tags
+            .iter()
+            .find(|(k, _)| k == "opening_hours")
+            .map(|(_, v)| v.as_str());
+        let tags_json = serde_json::to_string(tags).unwrap_or_default();
+
+        let _ = db.insert_place(
+            "node",
+            id,
+            lat,
+            lon,
+            name,
+            &cat,
+            &tags_json,
+            wikidata,
+            wikipedia,
+            website,
+            phone,
+            opening_hours,
+        );
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
@@ -43,74 +90,33 @@ fn main() {
     let input_path = Path::new(&args[1]);
     let output_path = Path::new(&args[2]);
 
-    // Remove existing DB
     let _ = std::fs::remove_file(output_path);
 
-    let db = std::sync::Arc::new(OsmDatabase::open(output_path).expect("Failed to open database"));
+    let db = Arc::new(OsmDatabase::open(output_path).expect("Failed to open database"));
 
     let reader = ElementReader::from_path(input_path).expect("Failed to open PBF");
     let start = Instant::now();
-    let mut count = 0;
+    let mut count = 0u64;
 
-    let db_clone = db.clone();
     reader
-        .for_each(move |element| {
-            let db = &db_clone;
+        .for_each(|element| {
+            let db = &db;
             match element {
                 osmpbf::Element::Node(node) => {
                     let tags: Vec<(String, String)> = node
                         .tags()
                         .map(|(k, v)| (k.to_string(), v.to_string()))
                         .collect();
-                    if let Some(cat) = category_from_tags(&tags) {
-                        let name = tags
-                            .iter()
-                            .find(|(k, _)| k == "name")
-                            .map(|(_, v)| v.as_str());
-                        let wikidata = tags
-                            .iter()
-                            .find(|(k, _)| k == "wikidata")
-                            .map(|(_, v)| v.as_str());
-                        let wikipedia = tags
-                            .iter()
-                            .find(|(k, _)| k == "wikipedia")
-                            .map(|(_, v)| v.as_str());
-                        let website = tags
-                            .iter()
-                            .find(|(k, _)| k == "website" || k == "contact:website")
-                            .map(|(_, v)| v.as_str());
-                        let phone = tags
-                            .iter()
-                            .find(|(k, _)| k == "phone" || k == "contact:phone")
-                            .map(|(_, v)| v.as_str());
-                        let opening_hours = tags
-                            .iter()
-                            .find(|(k, _)| k == "opening_hours")
-                            .map(|(_, v)| v.as_str());
-                        let tags_json = serde_json::to_string(&tags).unwrap_or_default();
-
-                        let _ = db.insert_place(
-                            "node",
-                            node.id(),
-                            node.lat(),
-                            node.lon(),
-                            name,
-                            &cat,
-                            &tags_json,
-                            wikidata,
-                            wikipedia,
-                            website,
-                            phone,
-                            opening_hours,
-                        );
-                        count += 1;
-                    }
+                    process_node(db, node.id(), node.lat(), node.lon(), &tags);
+                    count += 1;
                 }
-                osmpbf::Element::Way(way) => {
-                    // Skip ways for now - nodes are sufficient for POI discovery.
-                    // Ways (buildings, areas) can be added in a future iteration
-                    // by computing centroids from node references.
-                    let _ = way;
+                osmpbf::Element::DenseNode(node) => {
+                    let tags: Vec<(String, String)> = node
+                        .tags()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect();
+                    process_node(db, node.id(), node.lat(), node.lon(), &tags);
+                    count += 1;
                 }
                 _ => {}
             }
@@ -118,8 +124,12 @@ fn main() {
         .expect("Failed to read PBF");
 
     let elapsed = start.elapsed();
-    println!("Imported {} places in {:.1}s", count, elapsed.as_secs_f64());
-    println!("Database: {}", output_path.display());
+    println!(
+        "Processed {} elements in {:.1}s",
+        count,
+        elapsed.as_secs_f64()
+    );
     let total = db.count().unwrap_or(0);
-    println!("Total places in DB: {}", total);
+    println!("Places of interest in DB: {}", total);
+    println!("Database: {}", output_path.display());
 }
