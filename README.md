@@ -49,7 +49,7 @@ Provider response metadata, attribution, error states, cache/retention rules, an
 1. **MVP (now):** real OSM scanning, map, filters, source links, Windows developer setup and CI.
 2. Persistence, privacy-first favorites, local cache, better discovery/ranking with transparent *non-review* signals.
 3. Optional Google Places integration under an approved account and license. Respect attribution, caching, storage, display and API pricing rules; never use scraping to bypass access controls.
-4. Optional Reddit integration with approved API/terms; cite relevant public posts. Public-web search only through a provider permitting the intended use. Respect robots.txt, copyright, privacy and removal requests.
+4. Optional Reddit integration only after explicit API approval and terms review; see the [current eligibility assessment](docs/reddit-api-assessment.md). Cite original public posts; never scrape Reddit. Public-web search only through a provider permitting the intended use. Respect copyright, privacy and removal requests.
 5. Source-linked multi-source summaries from approved inputs, with transparent evidence and no fabricated quotes or sentiment.
 6. Desktop/PWA packaging, self-hosting and offline downloads only where licensed.
 
