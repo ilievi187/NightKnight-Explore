@@ -225,7 +225,7 @@ async fn main() {
         .init();
     let endpoints = configured_endpoints();
     let geocoder_endpoint = configured_geocoder_endpoint();
-    let bind = env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8787".to_owned());
+    let bind = env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8788".to_owned());
     let address: std::net::SocketAddr = bind.parse().expect("Invalid BIND_ADDRESS");
     if !address.ip().is_loopback() {
         panic!("Prototype must bind to localhost only");
