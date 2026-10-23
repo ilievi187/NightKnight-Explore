@@ -14,6 +14,14 @@ export const prettyElapsed = (ms: number): string => {
   return minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, '0')}s` : `${seconds}s`
 }
 
+/** Normalize an explicitly submitted search term. Returns null when invalid;
+ * this is not used for keystroke-driven autocomplete. */
+export function normalizePlaceQuery(query: string): string | null {
+  const normalized = query.trim().split(/\s+/).join(' ')
+  const length = [...normalized].length
+  return length >= 2 && length <= 200 ? normalized : null
+}
+
 /**
  * Reassurance copy shown while a scan runs. Phases are honest: they describe
  * elapsed time and provider expectations, never simulated progress.
@@ -89,4 +97,3 @@ export function scanErrorMessage(response: Response, body: unknown): string {
   }
   return `Scan failed (HTTP ${response.status}) with an unreadable response.`
 }
-

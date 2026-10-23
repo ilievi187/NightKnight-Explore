@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { gemTier, gemTierLabel, prettyDistance, prettyElapsed, readJsonBody, scanErrorMessage, scanProgressNote } from './scan'
+import { gemTier, gemTierLabel, normalizePlaceQuery, prettyDistance, prettyElapsed, readJsonBody, scanErrorMessage, scanProgressNote } from './scan'
 
 describe('distance formatting', () => {
   it('keeps meters below a kilometer', () => {
@@ -27,6 +27,22 @@ describe('elapsed formatting', () => {
 
   it('never shows a negative duration', () => {
     expect(prettyElapsed(-3000)).toBe('0s')
+  })
+})
+
+describe('explicit place search input', () => {
+  it('trims and normalizes whitespace only after submission', () => {
+    expect(normalizePlaceQuery('  Sofia   Bulgaria ')).toBe('Sofia Bulgaria')
+  })
+
+  it('rejects too-short and overlong search terms', () => {
+    expect(normalizePlaceQuery(' x ')).toBeNull()
+    expect(normalizePlaceQuery('x'.repeat(201))).toBeNull()
+  })
+
+  it('counts Unicode code points rather than UTF-16 units', () => {
+    expect(normalizePlaceQuery('🏰')).toBeNull()
+    expect(normalizePlaceQuery('🏰🏰')).toBe('🏰🏰')
   })
 })
 
