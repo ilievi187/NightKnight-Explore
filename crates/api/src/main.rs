@@ -325,11 +325,14 @@ async fn scan(
             );
             Ok(Json(response))
         }
-        Err(failure) => Err(provider_error(
-            failure.status(),
-            failure,
-            retry_hint(failure),
-        )),
+        Err(failure) => {
+            let upstream_hint = *state.last_retry_after.lock().await;
+            Err(provider_error(
+                failure.status(),
+                failure,
+                retry_hint(failure, upstream_hint),
+            ))
+        }
     }
 }
 
@@ -358,6 +361,8 @@ async fn fetch_overpass(
     state: &AppState,
     query: &str,
 ) -> Result<OverpassResponse, OverpassFailure> {
+    // Do not let a previous scan's Retry-After value affect this request.
+    *state.last_retry_after.lock().await = None;
     let deadline = Instant::now() + MAX_ATTEMPT_WINDOW;
     let mut last_failure: Option<OverpassFailure> = None;
     'endpoints: for endpoint in &state.endpoints {
@@ -389,6 +394,15 @@ async fn fetch_overpass(
                 Err(OverpassFailure::RateLimited) => {
                     tracing::warn!(endpoint, "Overpass rate limited this client");
                     last_failure = Some(OverpassFailure::RateLimited);
+                    // A long upstream Retry-After is not permission to retry
+                    // early. Skip this instance for this scan and try the
+                    // next configured service instead.
+                    let wait_hint = *state.last_retry_after.lock().await;
+                    if wait_hint
+                        .is_some_and(|seconds| Duration::from_secs(seconds) > RATE_LIMIT_WAIT_CAP)
+                    {
+                        break;
+                    }
                 }
                 // A stalled upstream is not worth a second wait: move on to
                 // the next endpoint immediately.
@@ -481,9 +495,9 @@ async fn attempt_overpass(
     Ok(payload)
 }
 
-fn retry_hint(failure: OverpassFailure) -> Option<u64> {
+fn retry_hint(failure: OverpassFailure, upstream_hint: Option<u64>) -> Option<u64> {
     match failure {
-        OverpassFailure::RateLimited => Some(COOLDOWN.as_secs()),
+        OverpassFailure::RateLimited => Some(upstream_hint.unwrap_or(COOLDOWN.as_secs())),
         _ => None,
     }
 }
@@ -1030,6 +1044,13 @@ mod tests {
     }
 
     #[test]
+    fn upstream_retry_after_is_preserved_in_the_client_hint() {
+        assert_eq!(retry_hint(OverpassFailure::RateLimited, Some(30)), Some(30));
+        assert_eq!(retry_hint(OverpassFailure::RateLimited, None), Some(8));
+        assert_eq!(retry_hint(OverpassFailure::Unavailable, Some(30)), None);
+    }
+
+    #[test]
     fn timeout_failure_maps_to_distinct_code() {
         let (status, Json(payload)) =
             provider_error(StatusCode::BAD_GATEWAY, OverpassFailure::TimedOut, None);
@@ -1185,6 +1206,34 @@ mod tests {
             2,
             "retry after the hint counts"
         );
+    }
+
+    #[tokio::test]
+    async fn long_retry_after_skips_endpoint_and_is_not_retried_early() {
+        let (limited, hits) = mock_overpass(vec![ScriptEntry::rate_limited(30)]).await;
+        let state = test_state(vec![limited], 20_000);
+
+        let result = fetch_overpass(&state, "[out:json];out;").await;
+
+        assert!(matches!(result, Err(OverpassFailure::RateLimited)));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let upstream_hint = *state.last_retry_after.lock().await;
+        assert_eq!(
+            retry_hint(OverpassFailure::RateLimited, upstream_hint),
+            Some(30)
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_after_from_a_previous_scan_is_not_reused() {
+        let (endpoint, hits) = mock_overpass(vec![ScriptEntry::status(500)]).await;
+        let state = test_state(vec![endpoint], 20_000);
+        *state.last_retry_after.lock().await = Some(45);
+
+        let _ = fetch_overpass(&state, "[out:json];out;").await;
+
+        assert_eq!(*state.last_retry_after.lock().await, None);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
