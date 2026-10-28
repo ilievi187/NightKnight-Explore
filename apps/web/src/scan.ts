@@ -86,6 +86,36 @@ export function isScanApiError(value: unknown): value is ScanApiError {
  * Human-readable scan failure text. Distinguishes "the API itself is
  * unreachable" from honest provider errors returned by the API.
  */
+export type ScanPage<T> = {
+  places: T[]
+  scanned_at_unix: number
+  source: string
+  cached: boolean
+  total_matches: number
+}
+
+/**
+ * Append the next scan page. Duplicate ids are ignored so a repeated page
+ * cannot inflate the loaded list, and `total_matches` stays the full count
+ * reported by the API rather than the number of places loaded so far.
+ */
+export function appendScanPage<T extends { id: string }>(
+  previous: ScanPage<T> | null,
+  page: ScanPage<T>,
+): ScanPage<T> {
+  if (!previous) return page
+  const seen = new Set(previous.places.map((place) => place.id))
+  const added = page.places.filter((place) => !seen.has(place.id))
+  return {
+    ...previous,
+    places: [...previous.places, ...added],
+    cached: page.cached,
+    total_matches: page.total_matches,
+    source: page.source,
+    scanned_at_unix: page.scanned_at_unix,
+  }
+}
+
 export function scanErrorMessage(response: Response, body: unknown): string {
   if (isScanApiError(body)) {
     const provider = body.provider_id ? ` · ${body.provider_id} / ${body.code}` : ''

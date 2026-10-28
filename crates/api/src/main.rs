@@ -37,6 +37,9 @@ const RATE_LIMIT_WAIT_CAP: Duration = Duration::from_secs(8);
 const ENDPOINT_FAILURE_PENALTY: Duration = Duration::from_secs(30);
 /// Overall cap on the failover chain so one scan never stalls indefinitely.
 const MAX_ATTEMPT_WINDOW: Duration = Duration::from_secs(120);
+/// Places returned in one scan response. The full match list stays in the
+/// memory cache so later pages do not call Overpass again.
+const SCAN_PAGE_SIZE: usize = 120;
 
 /// Public Overpass services used in order when no explicit endpoint is
 /// configured. Each is an independent shared resource; failover spreads load
@@ -68,7 +71,10 @@ struct AppState {
 }
 struct CachedScan {
     created: Instant,
-    response: ScanResponse,
+    /// Every matching place for this origin and radius, nearest first.
+    places: Vec<Place>,
+    scanned_at_unix: u64,
+    source: &'static str,
 }
 struct CachedGeocode {
     created: Instant,
@@ -620,26 +626,31 @@ async fn scan(
             "Invalid coordinates or radius (500–10000m)",
         ));
     }
-    let key = scan_cache_key(q.lat, q.lon, radius, offset);
-    let mut cache = state.cache.lock().await;
-    cache.retain(|_, hit| hit.created.elapsed() < OVERPASS_CACHE_TTL);
-    if let Some(hit) = cache.get(&key) {
-        let mut data = hit.response.clone();
-        data.cached = true;
-        return Ok(Json(data));
+    let key = scan_cache_key(q.lat, q.lon, radius);
+    {
+        let mut cache = state.cache.lock().await;
+        cache.retain(|_, hit| hit.created.elapsed() < OVERPASS_CACHE_TTL);
+        if let Some(hit) = cache.get(&key) {
+            return Ok(Json(scan_page(
+                &hit.places,
+                offset,
+                true,
+                hit.scanned_at_unix,
+                hit.source,
+            )));
+        }
     }
-    drop(cache);
     // If local OSM database is available, use it instead of Overpass.
     if let Some(db) = &state.osm_db {
-        let (places, total) = db
-            .search_nearby(q.lat, q.lon, radius, 120, offset)
+        let (places, _) = db
+            .search_nearby(q.lat, q.lon, radius, usize::MAX, 0)
             .map_err(|e| {
                 error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &format!("Local OSM DB error: {}", e),
                 )
             })?;
-        let places: Vec<Place> = places
+        let mut places: Vec<Place> = places
             .into_iter()
             .map(|lp| {
                 // Convert LocalPlace to Place
@@ -684,21 +695,22 @@ async fn scan(
                 }
             })
             .collect();
-        let mut places = places;
-        places.sort_by_key(|p| p.distance_m);
-        places.truncate(120);
-        let response = ScanResponse {
-            places,
-            scanned_at_unix: now_unix(),
-            source: "OpenStreetMap (local DB)",
-            cached: false,
-            total_matches: total,
-        };
+        sort_places(&mut places);
+        let scanned_at_unix = now_unix();
+        let response = scan_page(
+            &places,
+            offset,
+            false,
+            scanned_at_unix,
+            "OpenStreetMap (local DB)",
+        );
         state.cache.lock().await.insert(
             key,
             CachedScan {
                 created: Instant::now(),
-                response: response.clone(),
+                places,
+                scanned_at_unix,
+                source: "OpenStreetMap (local DB)",
             },
         );
         return Ok(Json(response));
@@ -725,21 +737,16 @@ async fn scan(
                 .into_iter()
                 .filter_map(|element| to_place(element, q.lat, q.lon, radius))
                 .collect();
-            places.sort_by_key(|p| p.distance_m);
-            places.truncate(120);
-            let total = places.len();
-            let response = ScanResponse {
-                places,
-                scanned_at_unix: now_unix(),
-                source: "OpenStreetMap",
-                cached: false,
-                total_matches: total,
-            };
+            sort_places(&mut places);
+            let scanned_at_unix = now_unix();
+            let response = scan_page(&places, offset, false, scanned_at_unix, "OpenStreetMap");
             state.cache.lock().await.insert(
                 key,
                 CachedScan {
                     created: Instant::now(),
-                    response: response.clone(),
+                    places,
+                    scanned_at_unix,
+                    source: "OpenStreetMap",
                 },
             );
             Ok(Json(response))
@@ -1144,14 +1151,45 @@ fn retry_hint(failure: OverpassFailure, upstream_hint: Option<u64>) -> Option<u6
     }
 }
 
-fn scan_cache_key(lat: f64, lon: f64, radius_m: u32, offset: usize) -> String {
+fn scan_cache_key(lat: f64, lon: f64, radius_m: u32) -> String {
+    // Pagination is applied after lookup. One cached scan serves every page,
+    // so the key must not include offset. Signed zero is normalized so
+    // 0.0 and -0.0 share a cache entry.
     let normalized_lat = if lat == 0.0 { 0.0 } else { lat };
     let normalized_lon = if lon == 0.0 { 0.0 } else { lon };
     format!(
-        "{:016x}:{:016x}:{radius_m}:{offset}",
+        "{:016x}:{:016x}:{radius_m}",
         normalized_lat.to_bits(),
         normalized_lon.to_bits()
     )
+}
+
+fn sort_places(places: &mut [Place]) {
+    places.sort_by(|left, right| {
+        left.distance_m
+            .cmp(&right.distance_m)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+/// Return one page without discarding the rest of the match list.
+fn scan_page(
+    places: &[Place],
+    offset: usize,
+    cached: bool,
+    scanned_at_unix: u64,
+    source: &'static str,
+) -> ScanResponse {
+    let total = places.len();
+    let start = offset.min(total);
+    let end = start.saturating_add(SCAN_PAGE_SIZE).min(total);
+    ScanResponse {
+        places: places[start..end].to_vec(),
+        scanned_at_unix,
+        source,
+        cached,
+        total_matches: total,
+    }
 }
 
 fn error(status: StatusCode, msg: &str) -> (StatusCode, Json<ApiError>) {
@@ -1855,21 +1893,134 @@ mod tests {
     #[test]
     fn scan_cache_key_distinguishes_nearby_origins() {
         assert_ne!(
-            scan_cache_key(43.21401, 27.915, 2500, 0),
-            scan_cache_key(43.21402, 27.915, 2500, 0)
+            scan_cache_key(43.21401, 27.915, 2500),
+            scan_cache_key(43.21402, 27.915, 2500)
         );
     }
 
     #[test]
     fn scan_cache_key_reuses_identical_origin_and_radius() {
         assert_eq!(
-            scan_cache_key(43.21401, 27.915, 2500, 0),
-            scan_cache_key(43.21401, 27.915, 2500, 0)
+            scan_cache_key(43.21401, 27.915, 2500),
+            scan_cache_key(43.21401, 27.915, 2500)
         );
         assert_ne!(
-            scan_cache_key(43.21401, 27.915, 2500, 0),
-            scan_cache_key(43.21401, 27.915, 3000, 0)
+            scan_cache_key(43.21401, 27.915, 2500),
+            scan_cache_key(43.21401, 27.915, 3000)
         );
+        assert_eq!(
+            scan_cache_key(0.0, 0.0, 2500),
+            scan_cache_key(-0.0, -0.0, 2500)
+        );
+    }
+
+    fn sample_place(id: &str, distance_m: u32) -> Place {
+        Place {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            category: "food".to_owned(),
+            lat: 0.0,
+            lon: 0.0,
+            distance_m,
+            source: "OpenStreetMap",
+            source_url: format!("https://www.openstreetmap.org/node/{id}"),
+            attribution: SourceAttribution {
+                provider_id: "openstreetmap",
+                label: "OpenStreetMap contributors",
+                text: "© OpenStreetMap contributors",
+                url: "https://www.openstreetmap.org/copyright",
+                license: "ODbL-1.0",
+            },
+            website: None,
+            gem: None,
+        }
+    }
+
+    #[test]
+    fn scan_page_keeps_matches_beyond_the_first_page() {
+        let mut places: Vec<_> = (0..125)
+            .map(|index| sample_place(&format!("node-{index}"), 5_000 - (index % 7) as u32))
+            .collect();
+        sort_places(&mut places);
+
+        let first = scan_page(&places, 0, false, 1, "OpenStreetMap");
+        assert_eq!(first.places.len(), SCAN_PAGE_SIZE);
+        assert_eq!(first.total_matches, 125);
+        assert!(!first.cached);
+        assert!(first.places.windows(2).all(|pair| {
+            pair[0].distance_m < pair[1].distance_m
+                || (pair[0].distance_m == pair[1].distance_m && pair[0].id <= pair[1].id)
+        }));
+
+        let second = scan_page(&places, SCAN_PAGE_SIZE, true, 1, "OpenStreetMap");
+        assert_eq!(second.places.len(), 5);
+        assert_eq!(second.total_matches, 125);
+        assert!(second.cached);
+        assert_ne!(second.places[0].id, first.places[0].id);
+
+        let past_end = scan_page(&places, 10_000, false, 1, "OpenStreetMap");
+        assert!(past_end.places.is_empty());
+        assert_eq!(past_end.total_matches, 125);
+    }
+
+    #[tokio::test]
+    async fn overpass_scan_pages_every_match_from_one_upstream_call() {
+        let elements: Vec<_> = (0..125)
+            .map(|index| {
+                serde_json::json!({
+                    "type": "node",
+                    "id": index + 1,
+                    "lat": 42.0 + (index as f64) * 0.00008,
+                    "lon": 23.0,
+                    "tags": {"name": format!("Cafe {index}"), "amenity": "cafe"}
+                })
+            })
+            .collect();
+        let body = serde_json::json!({ "elements": elements }).to_string();
+        let body: &'static str = Box::leak(body.into_boxed_str());
+        let (endpoint, hits) = mock_overpass(vec![ScriptEntry {
+            status: 200,
+            retry_after: None,
+            body,
+            delay: None,
+        }])
+        .await;
+        let state = test_state(vec![endpoint], 20_000);
+
+        let Json(first) = scan(
+            State(state.clone()),
+            Query(ScanQuery {
+                lat: 42.0,
+                lon: 23.0,
+                radius_m: Some(10_000),
+                offset: Some(0),
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(second) = scan(
+            State(state),
+            Query(ScanQuery {
+                lat: 42.0,
+                lon: 23.0,
+                radius_m: Some(10_000),
+                offset: Some(SCAN_PAGE_SIZE),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(first.places.len(), SCAN_PAGE_SIZE);
+        assert_eq!(first.total_matches, 125);
+        assert!(!first.cached);
+        assert_eq!(first.places[0].id, "node-1");
+        assert_eq!(first.places[119].id, "node-120");
+        assert_eq!(second.places.len(), 5);
+        assert_eq!(second.total_matches, 125);
+        assert!(second.cached);
+        assert_eq!(second.places[0].id, "node-121");
+        assert_eq!(second.places[4].id, "node-125");
     }
 
     #[test]

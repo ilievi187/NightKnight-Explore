@@ -42,7 +42,7 @@ Explicit place searches use the public Nominatim service by default, with a one-
 
 `GET /api/health` — server status
 
-`GET /api/scan?lat=43.214&lon=27.915&radius_m=2500` — manual POI scan, results with canonical record URLs, actual distance, per-place attribution, and an optional explained `gem` signal; provider failures include machine-readable codes and retry hints when known. Requests may return 429 on cooldown or 502/`provider_timeout` if the data providers are unavailable or stalled. No authentication is implemented; **do not bind this prototype to a public network interface**.
+`GET /api/scan?lat=43.214&lon=27.915&radius_m=2500` — manual POI scan, results with canonical record URLs, actual distance, per-place attribution, and an optional explained `gem` signal; provider failures include machine-readable codes and retry hints when known. A response contains at most 120 places. `total_matches` is the full match count for that origin and radius, and `offset` reads the next page from the same cached scan instead of hiding the rest or calling the provider again. Requests may return 429 on cooldown or 502/`provider_timeout` if the data providers are unavailable or stalled. No authentication is implemented; **do not bind this prototype to a public network interface**.
 
 `POST /api/geocode` (form field `q`) — explicit user-submitted place search; returns up to five results and OSM attribution. Search terms are not placed in the local API URL/log span. No autocomplete or automatic retry. Searches are cached in process memory for 24 hours; see [`docs/nominatim-geocoder-decision.md`](docs/nominatim-geocoder-decision.md).
 
