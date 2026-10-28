@@ -3,7 +3,7 @@ import type { Map as MapLibreMap, Marker } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import GoogleMap from './GoogleMap'
 import { addFavorite, clearFavorites, readFavorites, removeFavorite, type FavoritePlace } from './favorites'
-import { gemTier, gemTierLabel, normalizePlaceQuery, prettyDistance, prettyElapsed, readJsonBody, scanErrorMessage, scanProgressNote } from './scan'
+import { appendScanPage, gemTier, gemTierLabel, normalizePlaceQuery, prettyDistance, prettyElapsed, readJsonBody, scanErrorMessage, scanProgressNote } from './scan'
 
 type Category = 'all' | 'food' | 'stay' | 'see' | 'history' | 'nature'
 type GemReason = { text: string; field_path: string; observed_value: string }
@@ -160,13 +160,7 @@ export default function App(){
       if(!r.ok)throw new Error(scanErrorMessage(r,payload))
       if(!payload||typeof payload!=='object'||!Array.isArray((payload as ScanResponse).places)){throw new Error('Unexpected response')}
       const newData=payload as ScanResponse
-      // Append without duplicates
-      setData(prev=>{
-        if(!prev)return newData
-        const existingIds=new Set(prev.places.map(p=>p.id))
-        const newPlaces=newData.places.filter(p=>!existingIds.has(p.id))
-        return {...prev,places:[...prev.places,...newPlaces],cached:newData.cached}
-      })
+      setData(prev=>appendScanPage(prev,newData))
       setOffset(prev=>prev+120)
     }catch(e){if((e as Error).name!=='AbortError')setError((e as Error).message)}
     finally{setBusy(false)}

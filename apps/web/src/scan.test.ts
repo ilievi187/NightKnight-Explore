@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { gemTier, gemTierLabel, normalizePlaceQuery, prettyDistance, prettyElapsed, readJsonBody, scanErrorMessage, scanProgressNote } from './scan'
+import { appendScanPage, gemTier, gemTierLabel, normalizePlaceQuery, prettyDistance, prettyElapsed, readJsonBody, scanErrorMessage, scanProgressNote, type ScanPage } from './scan'
 
 describe('distance formatting', () => {
   it('keeps meters below a kilometer', () => {
@@ -124,5 +124,32 @@ describe('scan error messages', () => {
     const message = scanErrorMessage(fakeResponse(400, ''), undefined)
     expect(message).not.toContain('Unexpected end of JSON')
     expect(message).toContain('unreadable response')
+  })
+})
+
+describe('scan page append', () => {
+  const page = (ids: string[], total: number, cached = false): ScanPage<{ id: string }> => ({
+    places: ids.map((id) => ({ id })),
+    scanned_at_unix: 1,
+    source: 'OpenStreetMap',
+    cached,
+    total_matches: total,
+  })
+
+  it('keeps the first page unchanged when there is no previous scan', () => {
+    expect(appendScanPage(null, page(['a'], 1))).toEqual(page(['a'], 1))
+  })
+
+  it('appends the next page and preserves the full match count', () => {
+    const loaded = appendScanPage(page(['a', 'b'], 4), page(['c', 'd'], 4, true))
+    expect(loaded.places.map((place) => place.id)).toEqual(['a', 'b', 'c', 'd'])
+    expect(loaded.total_matches).toBe(4)
+    expect(loaded.cached).toBe(true)
+  })
+
+  it('ignores duplicate ids from a repeated page', () => {
+    const loaded = appendScanPage(page(['a', 'b'], 3), page(['b', 'c'], 3))
+    expect(loaded.places.map((place) => place.id)).toEqual(['a', 'b', 'c'])
+    expect(loaded.total_matches).toBe(3)
   })
 })
