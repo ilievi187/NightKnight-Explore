@@ -3,6 +3,7 @@ import type { Map as MapLibreMap, Marker } from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import GoogleMap from './GoogleMap'
 import { addFavorite, clearFavorites, readFavorites, removeFavorite, type FavoritePlace } from './favorites'
+import { CLUSTER_ZOOM_CUTOFF, clusterPoints, clusterThresholdPx } from './cluster'
 import { appendScanPage, gemTier, gemTierLabel, normalizePlaceQuery, prettyDistance, prettyElapsed, readJsonBody, scanErrorMessage, scanProgressNote } from './scan'
 
 type Category = 'all' | 'food' | 'stay' | 'see' | 'history' | 'nature'
@@ -31,8 +32,41 @@ function ExploreMap({places, lat, lon, selected, onSelect}:{places: Place[],lat:
   const mapRef=useRef<MapLibreMap|null>(null)
   const maplibreRef=useRef<typeof import('maplibre-gl')|null>(null)
   const markers=useRef<Marker[]>([])
+  const selectedRef=useRef(selected)
+  selectedRef.current=selected
   const [mapReady,setMapReady]=useState(false)
   const [mapError,setMapError]=useState(false)
+  const drawMarkers=useCallback(()=>{
+    const map=mapRef.current
+    const maplibre=maplibreRef.current
+    if(!map||!maplibre||!validLat(lat)||!validLon(lon))return
+    markers.current.forEach(marker=>marker.remove())
+    markers.current=[]
+    const origin=document.createElement('div');origin.className='map-origin';origin.title='Scan origin'
+    markers.current.push(new maplibre.Marker({element:origin}).setLngLat([lon,lat]).addTo(map))
+    const projected=places.map(place=>{
+      const point=map.project([place.lon,place.lat])
+      return {...place,x:point.x,y:point.y}
+    })
+    // Recomputed from the live zoom. Zooming in shrinks the pixel distance
+    // between places and, at the cutoff, turns grouping off entirely.
+    for(const group of clusterPoints(projected,clusterThresholdPx(map.getZoom()))){
+      if(group.points.length===1){
+        const place=group.points[0]
+        const isSelected=place.id===selectedRef.current
+        const marker=document.createElement('button');marker.type='button';marker.className=`place-marker${isSelected?' selected':''}`;marker.dataset.placeId=place.id;marker.setAttribute('aria-pressed',String(isSelected))
+        marker.textContent=symbol(place.category);marker.title=place.name;marker.setAttribute('aria-label',`Show ${place.name}`)
+        marker.addEventListener('click',()=>onSelect(place.id,marker))
+        markers.current.push(new maplibre.Marker({element:marker,anchor:'bottom'}).setLngLat([place.lon,place.lat]).addTo(map))
+      }else{
+        const center=map.unproject([group.x,group.y])
+        const marker=document.createElement('button');marker.type='button';marker.className='place-cluster';marker.textContent=String(group.points.length)
+        marker.title=`${group.points.length} places`;marker.setAttribute('aria-label',`${group.points.length} places. Zoom in to separate them.`)
+        marker.addEventListener('click',()=>{map.easeTo({center:[center.lng,center.lat],zoom:Math.min(map.getZoom()+2,CLUSTER_ZOOM_CUTOFF),duration:300})})
+        markers.current.push(new maplibre.Marker({element:marker}).setLngLat([center.lng,center.lat]).addTo(map))
+      }
+    }
+  },[places,lat,lon,onSelect])
   useEffect(()=>{
     let cancelled=false
     // MapLibre GL is ~1.3 MB; load it as a separate async chunk so the first
@@ -57,59 +91,16 @@ function ExploreMap({places, lat, lon, selected, onSelect}:{places: Place[],lat:
   useEffect(()=>{
     const map=mapRef.current
     const maplibre=maplibreRef.current
-    if(!map||!maplibre||!validLat(lat)||!validLon(lon))return
-    markers.current.forEach(m=>m.remove());markers.current=[]
-    const origin=document.createElement('div');origin.className='map-origin';origin.title='Scan origin'
-    markers.current.push(new maplibre.Marker({element:origin}).setLngLat([lon,lat]).addTo(map))
-    // Simple clustering: group places within ~50px at current zoom
-    const zoom=map.getZoom()
-    const clusterThreshold=zoom<11?80:zoom<13?40:0
-    if(clusterThreshold>0&&places.length>5){
-      // Group into clusters
-      const clusters: {center:[number,number],places:Place[]}[]=[]
-      const used=new Set<number>()
-      for(let i=0;i<places.length;i++){
-        if(used.has(i))continue
-        const cluster={center:[places[i].lon,places[i].lat] as [number,number],places:[places[i]]}
-        used.add(i)
-        for(let j=i+1;j<places.length;j++){
-          if(used.has(j))continue
-          const dx=(places[j].lon-places[i].lon)*111000*Math.cos(lat*Math.PI/180)
-          const dy=(places[j].lat-places[i].lat)*111000
-          if(Math.sqrt(dx*dx+dy*dy)<clusterThreshold*1000/zoom){
-            cluster.places.push(places[j]);used.add(j)
-            cluster.center[0]=(cluster.center[0]+places[j].lon)/2
-            cluster.center[1]=(cluster.center[1]+places[j].lat)/2
-          }
-        }
-        clusters.push(cluster)
-      }
-      for(const cluster of clusters){
-        if(cluster.places.length===1){
-          const place=cluster.places[0]
-          const marker=document.createElement('button');marker.type='button';marker.className='place-marker';marker.dataset.placeId=place.id;marker.setAttribute('aria-pressed','false')
-          marker.textContent=symbol(place.category);marker.title=place.name;marker.setAttribute('aria-label',`Show ${place.name}`)
-          marker.addEventListener('click',()=>onSelect(place.id,marker))
-          markers.current.push(new maplibre.Marker({element:marker,anchor:'bottom'}).setLngLat([place.lon,place.lat]).addTo(map))
-        } else {
-          const marker=document.createElement('button');marker.type='button';marker.className='place-cluster';marker.textContent=String(cluster.places.length);marker.title=`${cluster.places.length} places`
-          marker.addEventListener('click',()=>{map.easeTo({center:cluster.center,zoom:zoom+2,duration:300})})
-          markers.current.push(new maplibre.Marker({element:marker}).setLngLat(cluster.center).addTo(map))
-        }
-      }
-    } else {
-      for(const place of places){
-        const marker=document.createElement('button');marker.type='button';marker.className='place-marker';marker.dataset.placeId=place.id;marker.setAttribute('aria-pressed','false')
-        marker.textContent=symbol(place.category);marker.title=place.name;marker.setAttribute('aria-label',`Show ${place.name}`)
-        marker.addEventListener('click',()=>onSelect(place.id,marker))
-        markers.current.push(new maplibre.Marker({element:marker,anchor:'bottom'}).setLngLat([place.lon,place.lat]).addTo(map))
-      }
-    }
+    if(!map||!maplibre||!mapReady||!validLat(lat)||!validLon(lon))return
+    drawMarkers()
+    const onZoom=()=>drawMarkers()
+    map.on('zoomend',onZoom)
     if(places.length){
-      const bounds=new maplibre.LngLatBounds([lon,lat],[lon,lat]);places.forEach(p=>bounds.extend([p.lon,p.lat]));
+      const bounds=new maplibre.LngLatBounds([lon,lat],[lon,lat]);places.forEach(place=>bounds.extend([place.lon,place.lat]));
       map.fitBounds(bounds,{padding:60,maxZoom:14,duration:500})
     }else {map.easeTo({center:[lon,lat],zoom:12,duration:300})}
-  },[places,lat,lon,onSelect,mapReady])
+    return ()=>{map.off('zoomend',onZoom)}
+  },[drawMarkers,places,lat,lon,mapReady])
   useEffect(()=>{
     markers.current.forEach(marker=>{
       const element=marker.getElement()
