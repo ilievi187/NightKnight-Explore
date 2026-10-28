@@ -1,10 +1,14 @@
 # Agent handoff
 
-Updated: 2026-10-29. Base before this cycle: `main` `a66c5e50`.
+Updated: 2026-10-29. `main` includes pagination fix `c4a496a` (#33).
+
+## Landed
+
+Live Overpass scans no longer hide matches past the first 120. The memory cache stores the full nearest-first list for one origin and radius. `total_matches` is the full count. `offset` reads the next page from that cache.
 
 ## This cycle
 
-Live Overpass scans sorted matches, kept 120, and set `total_matches` to that page length. `offset` did not select a later page, so Load More never revealed the rest. The scan cache now stores the full nearest-first list for one origin and radius. Each response returns at most 120 places and the real total. Later pages are read from that cache and do not call Overpass again.
+Map clusters were built once, in meters, and never rebuilt when the user zoomed, so a cluster click zoomed the camera but left the same bubble in place. Markers are now grouped in screen pixels and redrawn on `zoomend`. Grouping turns off at zoom 15 and closer. A cluster click zooms toward that cutoff.
 
 ## Do not repeat
 
@@ -13,10 +17,8 @@ Live Overpass scans sorted matches, kept 120, and set `total_matches` to that pa
 
 ## Next objective
 
-Map clusters are computed once when the result list changes. Zooming in does not split a cluster into individual place markers. Fix that interaction next, with a pure clustering helper and tests. Do not invent ratings, reviews, or places.
+Estimated walking and driving time from a reviewed routing service. Do not invent ratings, reviews, or places. Do not call a public routing demo until its usage policy is recorded the same way Nominatim was.
 
-## Verification for this cycle
+## Verification still required
 
-- `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` in `crates/api` (32 tests passed, including the new page tests).
-- `npm test` (34 passed) and `npm run typecheck` in `apps/web`.
-- CI on the pull request still has to be read from GitHub after push. Local success is not CI success.
+Read GitHub Actions on the open pull request. Local test success is not CI success.
